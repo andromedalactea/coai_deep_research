@@ -57,6 +57,82 @@ This will open the LangGraph Studio UI in your browser.
 
 Ask a question in the `messages` input field and click `Submit`. Select different configuration in the "Manage Assistants" tab.
 
+---
+
+## 🧪 NEW: Computational Scientific Discovery System
+
+For research requiring **numerical simulations, data analysis, and computational experiments**, we now provide a specialized system that goes beyond information gathering to perform actual scientific discovery.
+
+### Key Capabilities
+
+- 🔬 **Hypothesis Generation & Testing**: Automatically generate and test scientific hypotheses
+- 💻 **Code Execution**: Run Python simulations in secure E2B sandboxes
+- 📊 **Data Visualization**: Generate publication-quality figures automatically
+- 🗄️ **Scientific Databases**: Query NASA archives, ArXiv, SDSS, MAST
+- 📈 **Statistical Analysis**: Perform rigorous hypothesis testing with p-values and confidence intervals
+- 🔄 **Iterative Discovery**: Refine hypotheses based on computational results
+- 📝 **Comprehensive Reports**: Produce research reports with embedded figures and statistical evidence
+
+### Quick Start
+
+1. **Install E2B SDK**:
+```bash
+pip install e2b-code-interpreter
+```
+
+2. **Set API Keys**:
+```bash
+export E2B_API_KEY=your_key        # Get from https://e2b.dev/dashboard
+export OPENAI_API_KEY=your_key
+```
+
+3. **Run a Discovery**:
+```python
+from open_deep_research.computational import run_computational_discovery
+
+result = await run_computational_discovery(
+    query="""
+    Investigate the correlation between exoplanet orbital periods 
+    and stellar metallicity. Query NASA Exoplanet Archive, perform 
+    statistical analysis, and generate visualizations.
+    """
+)
+
+print(result['final_report'])
+```
+
+### Example: Novel Biosignature Discovery
+
+See `examples/biosignature-discovery.md` for a complete example of discovering new, non-Earth-centric biosignatures through:
+- Literature review (ArXiv queries with equation extraction)
+- Thermodynamic modeling (Gibbs free energy calculations)
+- Spectral predictions (synthetic JWST spectra)
+- Statistical analysis (detectability assessments)
+- Phase space exploration (viability mapping)
+
+```bash
+# Try the example
+python develop-eggs/example_discovery_session.py
+```
+
+### Testing
+
+```bash
+# Run comprehensive test suite
+python develop-eggs/test_computational_discovery.py
+```
+
+**Expected output**: All 6 tests passing including E2B integration and full discovery workflow.
+
+### Documentation
+
+- **User Guide**: `develop-eggs/README.md`
+- **Implementation Details**: `develop-eggs/IMPLEMENTATION_COMPLETE.md`
+- **Quick Start**: `develop-eggs/QUICK_START.md`
+- **Example Prompts**: `examples/biosignature-discovery.md`
+
+---
+
 ### ⚙️ Configurations
 
 #### LLM :brain:
