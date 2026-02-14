@@ -404,10 +404,8 @@ async def execute_code(
         )
         result.execution_time_seconds = execution_time
         
-        # Extract any statistical results from stdout
-        if result.stdout:
-            stat_outputs = OutputProcessor.extract_statistical_results(result.stdout)
-            result.outputs.extend(stat_outputs)
+        # NOTE: Statistical results are already extracted in process_execution_result()
+        # Do NOT extract again here to avoid duplicates
         
         return result
         

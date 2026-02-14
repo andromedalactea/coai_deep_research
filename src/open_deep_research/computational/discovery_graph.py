@@ -19,6 +19,7 @@ from open_deep_research.computational.discovery_nodes import (
     analyze_results,
     clarify_discovery_query,
     discovery_supervisor,
+    explore_data,
     gather_knowledge,
     generate_research_brief,
     run_experiment,
@@ -29,7 +30,7 @@ from open_deep_research.computational.state import (
     ComputationalDiscoveryInputState,
     ComputationalDiscoveryState,
 )
-from open_deep_research.configuration import Configuration
+from open_deep_research.computational.configuration import ComputationalConfiguration
 
 
 # =============================================================================
@@ -88,11 +89,11 @@ def build_computational_discovery_graph():
     This enables dynamic routing based on tool calls and state.
     """
     
-    # Build main graph
+    # Build main graph - use ComputationalConfiguration to expose all discovery settings
     discovery_builder = StateGraph(
         ComputationalDiscoveryState,
         input=ComputationalDiscoveryInputState,
-        config_schema=Configuration
+        config_schema=ComputationalConfiguration
     )
     
     # Add all nodes
@@ -101,6 +102,7 @@ def build_computational_discovery_graph():
     discovery_builder.add_node("discovery_supervisor", discovery_supervisor)
     discovery_builder.add_node("supervisor_tools", supervisor_tools)
     discovery_builder.add_node("gather_knowledge", gather_knowledge)
+    discovery_builder.add_node("explore_data", explore_data)  # Schema discovery before experiments
     discovery_builder.add_node("run_experiment", run_experiment)
     discovery_builder.add_node("analyze_results", analyze_results)
     discovery_builder.add_node("synthesize_findings", synthesize_findings)
@@ -113,8 +115,9 @@ def build_computational_discovery_graph():
     # - clarify_discovery_query → generate_research_brief OR END
     # - generate_research_brief → discovery_supervisor
     # - discovery_supervisor → supervisor_tools
-    # - supervisor_tools → discovery_supervisor OR gather_knowledge OR run_experiment OR synthesize_findings
+    # - supervisor_tools → discovery_supervisor OR gather_knowledge OR explore_data OR run_experiment OR synthesize_findings
     # - gather_knowledge → discovery_supervisor
+    # - explore_data → discovery_supervisor (returns schema discovery findings)
     # - run_experiment → analyze_results
     # - analyze_results → discovery_supervisor
     # - synthesize_findings → END OR discovery_supervisor (if insufficient experiments)

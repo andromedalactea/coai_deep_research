@@ -77,6 +77,16 @@ from open_deep_research.computational.configuration import (
     ScientificDomain,
     get_domain_specific_packages,
     get_domain_data_sources,
+    get_domain_prompt_context,
+)
+
+from open_deep_research.computational.traceability import (
+    TraceEventType,
+    TraceEvent,
+    CodeExecutionTrace,
+    SupervisorDecisionTrace,
+    ResearchTrace,
+    TraceManager,
 )
 
 __all__ = [
@@ -134,4 +144,13 @@ __all__ = [
     "ScientificDomain",
     "get_domain_specific_packages",
     "get_domain_data_sources",
+    "get_domain_prompt_context",
+    
+    # Traceability
+    "TraceEventType",
+    "TraceEvent",
+    "CodeExecutionTrace",
+    "SupervisorDecisionTrace",
+    "ResearchTrace",
+    "TraceManager",
 ]

@@ -375,3 +375,86 @@ def get_domain_data_sources(domain: ScientificDomain) -> List[str]:
     }
     
     return sources.get(domain, sources[ScientificDomain.GENERAL])
+
+
+def get_domain_prompt_context(domain: ScientificDomain) -> str:
+    """Get domain-specific guidance text for injection into prompts.
+    
+    This replaces hardcoded astronomy references with domain-appropriate
+    data sources, example queries, and methodology guidance.
+    """
+    contexts = {
+        ScientificDomain.ASTRONOMY: """
+**Domain: Astronomy & Astrophysics**
+
+Available real data sources via **astroquery**:
+- **NASA Exoplanet Archive**: Confirmed exoplanets (mass, radius, orbital parameters, stellar properties)
+- **SIMBAD**: Stellar classifications, coordinates, proper motions
+- **VizieR/Gaia DR3**: Precise stellar positions, parallaxes, photometry
+- **MAST**: HST, JWST, Kepler, TESS observations and light curves
+- **SDSS**: Galaxy surveys, spectroscopic data
+- **Lightkurve**: Time-series photometry from Kepler/TESS
+
+Install astroquery in the sandbox: `pip install astroquery astropy lightkurve`
+
+Key packages: astropy, astroquery, lightkurve, rebound, specutils
+""",
+        ScientificDomain.PHYSICS: """
+**Domain: Physics**
+
+Available data and computation tools:
+- **NIST databases**: Physical constants, atomic spectra, material properties
+- **arXiv**: Latest physics papers and preprints
+- **HEPData**: High energy physics experimental data
+- Simulation tools: scipy.integrate, sympy, numba for computational physics
+
+Key packages: sympy, uncertainties, pint, lmfit, scipy
+""",
+        ScientificDomain.BIOLOGY: """
+**Domain: Biology & Bioinformatics**
+
+Available data sources:
+- **UniProt**: Protein sequences and functional information
+- **NCBI/GenBank**: Genomic sequences and annotations
+- **PubMed**: Biomedical literature
+- **Gene Ontology**: Functional gene annotations
+- **Biopython**: Sequence analysis tools
+
+Key packages: biopython, scikit-bio, networkx, lifelines
+""",
+        ScientificDomain.CHEMISTRY: """
+**Domain: Chemistry**
+
+Available data sources:
+- **PubChem**: Chemical compound data, bioactivity
+- **ChEMBL**: Drug-like molecules and bioactivity data
+- **NIST Chemistry WebBook**: Thermodynamic data, spectra
+- Computational chemistry: molecular descriptors, reaction energetics
+
+Key packages: rdkit, ase, pymatgen, chempy, cclib
+""",
+        ScientificDomain.CLIMATE: """
+**Domain: Climate Science**
+
+Available data sources:
+- **NOAA**: Climate observations, weather data
+- **NASA GISS**: Global temperature records
+- **ERA5**: Reanalysis climate data
+- **CMIP6**: Climate model outputs
+
+Key packages: xarray, cartopy, netCDF4, cftime, cfgrib
+""",
+        ScientificDomain.GENERAL: """
+**Domain: General Scientific Research**
+
+Available tools:
+- **arXiv**: Academic papers across all sciences
+- **Web APIs**: Various scientific data APIs via fetch_scientific_api
+- Statistical analysis: scipy.stats, statsmodels, scikit-learn
+- Visualization: matplotlib, seaborn, plotly
+
+Key packages: numpy, scipy, pandas, matplotlib, scikit-learn, statsmodels
+"""
+    }
+    
+    return contexts.get(domain, contexts[ScientificDomain.GENERAL])

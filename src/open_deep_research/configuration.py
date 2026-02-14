@@ -160,6 +160,46 @@ class Configuration(BaseModel):
             }
         }
     )
+    supervisor_model: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Optional dedicated model for supervisor/planning nodes. If unset, falls back to research_model."
+            }
+        }
+    )
+    supervisor_model_max_tokens: Optional[int] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": None,
+                "description": "Optional max output tokens for supervisor_model. If unset, falls back to research_model_max_tokens."
+            }
+        }
+    )
+    worker_model: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Optional dedicated model for worker/researcher nodes. If unset, falls back to research_model."
+            }
+        }
+    )
+    worker_model_max_tokens: Optional[int] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": None,
+                "description": "Optional max output tokens for worker_model. If unset, falls back to research_model_max_tokens."
+            }
+        }
+    )
     research_model_max_tokens: int = Field(
         default=10000,
         metadata={

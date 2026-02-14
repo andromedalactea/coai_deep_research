@@ -40,6 +40,18 @@ from open_deep_research.computational.code_interpreter import (
     validate_experiment_quality,
     get_quality_improvement_suggestions,
 )
+from open_deep_research.computational.traceability import (
+    TraceEventType,
+    TraceManager,
+    trace_node_enter,
+    trace_node_exit,
+    trace_code_execution,
+    trace_supervisor_decision,
+    trace_hypothesis_created,
+    trace_experiment_started,
+    trace_finding_recorded,
+    trace_output_generated,
+)
 from open_deep_research.computational.prompts import (
     discovery_clarification_prompt,
     discovery_supervisor_prompt,
@@ -70,8 +82,15 @@ from open_deep_research.computational.state import (
     HypothesisStatus,
     IterationDecision,
     OutputType,
+    PaperData,
+    ScientificDataSource,
+    DataSourceType,
 )
-from open_deep_research.configuration import Configuration
+from open_deep_research.computational.configuration import (
+    ComputationalConfiguration,
+    ScientificDomain,
+    get_domain_prompt_context,
+)
 from open_deep_research.utils import (
     get_api_key_for_model,
     get_today_str,
@@ -90,12 +109,26 @@ configurable_model = init_chat_model(
 # Helper Functions
 # =============================================================================
 
-def get_model_config(configurable: Configuration, config: RunnableConfig) -> Dict[str, Any]:
-    """Get model configuration from settings."""
+def get_supervisor_model_config(configurable: ComputationalConfiguration, config: RunnableConfig) -> Dict[str, Any]:
+    """Get supervisor model configuration with fallback to research model."""
+    model_name = configurable.supervisor_model or configurable.research_model
+    max_tokens = configurable.supervisor_model_max_tokens or configurable.research_model_max_tokens
     return {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
+        "model": model_name,
+        "max_tokens": max_tokens,
+        "api_key": get_api_key_for_model(model_name, config),
+        "tags": ["langsmith:nostream"]
+    }
+
+
+def get_worker_model_config(configurable: ComputationalConfiguration, config: RunnableConfig) -> Dict[str, Any]:
+    """Get worker model configuration with fallback to research model."""
+    model_name = configurable.worker_model or configurable.research_model
+    max_tokens = configurable.worker_model_max_tokens or configurable.research_model_max_tokens
+    return {
+        "model": model_name,
+        "max_tokens": max_tokens,
+        "api_key": get_api_key_for_model(model_name, config),
         "tags": ["langsmith:nostream"]
     }
 
@@ -200,6 +233,78 @@ def summarize_experiments(experiments: List[ExperimentRecord]) -> str:
             summaries.append(f"  Finding: {findings}...")
     
     return "\n".join(summaries)
+
+
+def summarize_data_explorations(data_explorations: List[Dict[str, Any]]) -> str:
+    """Create a summary of data exploration findings for experiment design context."""
+    if not data_explorations:
+        return "No data explorations performed yet. Consider using ExploreData first to discover database schemas."
+    
+    summaries = []
+    for exp in data_explorations:
+        data_source = escape_format_braces(str(exp.get("data_source", "Unknown")))
+        goal = escape_format_braces(str(exp.get("goal", "")))
+        success = exp.get("success", False)
+        findings = escape_format_braces(str(exp.get("findings", "")[:2000]))
+        
+        status = "SUCCESS" if success else "FAILED"
+        summaries.append(f"### Exploration: {data_source} [{status}]")
+        summaries.append(f"Goal: {goal}")
+        if findings:
+            summaries.append(f"Findings:\n{findings}")
+        summaries.append("")
+    
+    return "\n".join(summaries)
+
+
+def build_progress_summary(state: ComputationalDiscoveryState) -> str:
+    """Build a concise progress summary for the supervisor system prompt.
+    
+    This replaces the noisy accumulation of all previous messages with a
+    clean, structured summary of what has been accomplished.
+    """
+    parts = []
+    
+    # Knowledge gathered
+    knowledge_summary = state.get("knowledge_summary", "")
+    if knowledge_summary:
+        parts.append(f"**Knowledge Gathered:**\n{knowledge_summary[:1500]}")
+    
+    # Data explorations
+    data_explorations = state.get("data_explorations", [])
+    if data_explorations:
+        successful = [e for e in data_explorations if e.get("success")]
+        failed = [e for e in data_explorations if not e.get("success")]
+        parts.append(f"**Data Explorations:** {len(successful)} successful, {len(failed)} failed")
+        for exp in successful[:3]:
+            parts.append(f"  - {exp.get('data_source', '?')}: {exp.get('goal', '')[:100]}")
+    
+    # Hypotheses
+    hypotheses = state.get("hypotheses", [])
+    if hypotheses:
+        parts.append(f"\n**Hypotheses ({len(hypotheses)}):**")
+        parts.append(summarize_hypotheses(hypotheses))
+    
+    # Experiments
+    experiments = state.get("experiments", [])
+    if experiments:
+        parts.append(f"\n**Experiments ({len(experiments)}):**")
+        parts.append(summarize_experiments(experiments))
+    
+    # Key findings
+    findings = state.get("findings", [])
+    if findings:
+        parts.append(f"\n**Key Findings ({len(findings)}):**")
+        parts.append(summarize_findings(findings))
+    
+    # New questions
+    new_questions = state.get("new_questions", [])
+    if new_questions:
+        parts.append(f"\n**Open Questions:**")
+        for q in new_questions[-3:]:
+            parts.append(f"  - {q}")
+    
+    return "\n".join(parts) if parts else "No progress yet. Start by gathering knowledge."
 
 
 def create_outputs_catalogue(state: ComputationalDiscoveryState) -> str:
@@ -329,7 +434,7 @@ async def clarify_discovery_query(
     This node analyzes the user's research query and determines if
     clarification is needed before proceeding with the discovery process.
     """
-    configurable = Configuration.from_runnable_config(config)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
     
     # Check if clarification is allowed
     # Also check environment variable directly for robustness
@@ -338,7 +443,7 @@ async def clarify_discovery_query(
         return Command(goto="generate_research_brief")
     
     messages = state.get("messages", [])
-    model_config = get_model_config(configurable, config)
+    model_config = get_supervisor_model_config(configurable, config)
     
     prompt = discovery_clarification_prompt.format(
         messages=get_buffer_string(messages),
@@ -392,40 +497,80 @@ async def generate_research_brief(
     This transforms the user's messages into a structured research brief
     that will guide the entire discovery process.
     """
-    configurable = Configuration.from_runnable_config(config)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
     messages = state.get("messages", [])
-    model_config = get_model_config(configurable, config)
+    model_config = get_supervisor_model_config(configurable, config)
+    
+    # Initialize trace if not already done
+    trace_node_enter("generate_research_brief")
+    
+    research_query = get_buffer_string(messages)
     
     research_model = configurable_model.with_config(model_config)
     
+    # Get domain context for the prompt
+    domain = configurable.scientific_domain
+    domain_context = get_domain_prompt_context(domain)
+    
     prompt = research_brief_generation_prompt.format(
-        messages=get_buffer_string(messages),
-        date=get_today_str()
+        messages=research_query,
+        date=get_today_str(),
+        domain_context=domain_context
     )
     
     response = await research_model.ainvoke([HumanMessage(content=prompt)])
     research_brief = response.content
     
-    # Initialize supervisor with the research brief
-    supervisor_prompt = discovery_supervisor_prompt.format(
-        date=get_today_str(),
-        research_brief=research_brief,
-        iteration=0,
-        max_iterations=configurable.max_researcher_iterations,
-        hypotheses_count=0,
-        experiments_count=0,
-        findings_count=0
+    # Record the research brief generation
+    TraceManager.add_event(
+        event_type=TraceEventType.NODE_EXIT,
+        title="Research Brief Generated",
+        node_name="generate_research_brief",
+        description=f"Generated research brief from user query",
+        data={
+            "research_query_length": len(research_query),
+            "research_brief_length": len(research_brief),
+            "model": configurable.research_model,
+            "scientific_domain": domain.value if hasattr(domain, 'value') else str(domain),
+        },
+        success=True
     )
+    
+    # Update trace with research context
+    trace = TraceManager.get_trace()
+    if trace:
+        trace.research_query = research_query
+        trace.research_brief = research_brief
+    
+    # Generate trace ID for this run
+    trace_id = str(uuid.uuid4())[:12]
+    
+    # NOTE: We do NOT pre-build the supervisor system prompt here.
+    # The supervisor node rebuilds it fresh each iteration with current state.
+    # We only pass the research brief and initial context.
     
     return Command(
         goto="discovery_supervisor",
         update={
             "research_brief": research_brief,
-            "research_query": get_buffer_string(messages),
+            "research_query": research_query,
+            "scientific_domain": domain.value if hasattr(domain, 'value') else str(domain),
+            "trace_id": trace_id,
+            "trace_started_at": datetime.now().isoformat(),
+            "trace_events": [{
+                "event_type": "research_brief_generated",
+                "timestamp": datetime.now().isoformat(),
+                "title": "Research Brief Generated",
+                "data": {
+                    "research_query": research_query[:1000],
+                    "research_brief": research_brief[:2000],
+                    "model": configurable.research_model,
+                }
+            }],
+            # Initialize supervisor_messages with just the research brief
             "supervisor_messages": {
                 "type": "override",
                 "value": [
-                    SystemMessage(content=supervisor_prompt),
                     HumanMessage(content=f"Research Brief:\n{research_brief}")
                 ]
             }
@@ -439,14 +584,17 @@ async def discovery_supervisor(
 ) -> Command[Literal["supervisor_tools"]]:
     """Main discovery supervisor that orchestrates the research process.
     
-    The supervisor decides what action to take next:
-    - Gather more knowledge
-    - Generate/refine hypotheses
-    - Design and run experiments
-    - Synthesize findings
+    KEY DESIGN: The system prompt is rebuilt fresh each iteration with:
+    - The research brief (constant)
+    - A compressed progress summary (replaces noisy message history)
+    - Domain-specific context
+    - Only recent supervisor messages (last 6) to maintain conversation flow
+    
+    This prevents context pollution from accumulated tool messages and
+    ensures the supervisor always has clean, relevant context.
     """
-    configurable = Configuration.from_runnable_config(config)
-    model_config = get_model_config(configurable, config)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    model_config = get_supervisor_model_config(configurable, config)
     
     # Define supervisor tools
     from pydantic import BaseModel, Field
@@ -480,7 +628,23 @@ async def discovery_supervisor(
             description="Why discovery is being concluded"
         )
     
-    supervisor_tools = [GatherKnowledge, RunExperiment, SynthesizeFindings, think_tool]
+    class ExploreData(BaseModel):
+        """Explore database schemas and APIs BEFORE running experiments. 
+        Use this to discover correct column names, data types, and query syntax."""
+        data_source: str = Field(
+            description=(
+                "The data source to explore. Examples: 'NASA Exoplanet Archive', "
+                "'SIMBAD', 'VizieR/Gaia DR3', 'MAST'"
+            )
+        )
+        exploration_goal: str = Field(
+            description=(
+                "What you want to discover. Example: 'Discover column names for "
+                "exoplanet radius, mass, equilibrium temperature, and discovery method'"
+            )
+        )
+    
+    supervisor_tools = [GatherKnowledge, ExploreData, RunExperiment, SynthesizeFindings, think_tool]
     
     supervisor_model = (
         configurable_model
@@ -489,28 +653,46 @@ async def discovery_supervisor(
         .with_config(model_config)
     )
     
-    # Update supervisor context
-    supervisor_messages = state.get("supervisor_messages", [])
+    # =========================================================================
+    # PRIORITY 1: Rebuild system prompt fresh with compressed state
+    # =========================================================================
+    research_brief = state.get("research_brief", "")
+    domain_str = state.get("scientific_domain", "general")
     
-    # Add current state summary
-    state_summary = f"""
-Current Discovery State:
-- Iteration: {state.get('discovery_iterations', 0)} / {configurable.max_researcher_iterations}
-- Hypotheses: {len(state.get('hypotheses', []))}
-- Experiments: {len(state.get('experiments', []))}
-- Findings: {len(state.get('findings', []))}
-
-Hypotheses Status:
-{summarize_hypotheses(state.get('hypotheses', []))}
-
-Key Findings:
-{summarize_findings(state.get('findings', []))}
-"""
+    # Map string domain to enum for context lookup
+    try:
+        domain_enum = ScientificDomain(domain_str)
+    except (ValueError, KeyError):
+        domain_enum = ScientificDomain.GENERAL
+    
+    domain_context = get_domain_prompt_context(domain_enum)
+    progress_summary = build_progress_summary(state)
+    
+    # Build fresh system prompt with current state
+    # Escape braces in dynamic content to prevent KeyError during format()
+    system_prompt = discovery_supervisor_prompt.format(
+        date=get_today_str(),
+        research_brief=escape_format_braces(research_brief),
+        domain_context=escape_format_braces(domain_context),
+        iteration=state.get('discovery_iterations', 0),
+        max_iterations=configurable.max_discovery_iterations,
+        hypotheses_count=len(state.get('hypotheses', [])),
+        experiments_count=len(state.get('experiments', [])),
+        findings_count=len(state.get('findings', [])),
+        progress_summary=escape_format_braces(progress_summary)
+    )
+    
+    # Keep only the last N supervisor messages for conversation continuity
+    # This prevents context window pollution from accumulated tool messages
+    supervisor_messages = state.get("supervisor_messages", [])
+    MAX_RECENT_MESSAGES = 6
+    recent_messages = supervisor_messages[-MAX_RECENT_MESSAGES:] if len(supervisor_messages) > MAX_RECENT_MESSAGES else supervisor_messages
+    
+    # Build the message list: fresh system prompt + recent conversation
+    messages_for_model = [SystemMessage(content=system_prompt)] + recent_messages
     
     # Invoke supervisor
-    response = await supervisor_model.ainvoke(supervisor_messages + [
-        HumanMessage(content=state_summary)
-    ])
+    response = await supervisor_model.ainvoke(messages_for_model)
     
     return Command(
         goto="supervisor_tools",
@@ -524,19 +706,29 @@ Key Findings:
 async def supervisor_tools(
     state: ComputationalDiscoveryState,
     config: RunnableConfig
-) -> Command[Literal["discovery_supervisor", "gather_knowledge", "run_experiment", "synthesize_findings", "__end__"]]:
+) -> Command[Literal["discovery_supervisor", "gather_knowledge", "explore_data", "run_experiment", "synthesize_findings", "__end__"]]:
     """Execute tools called by the discovery supervisor."""
-    configurable = Configuration.from_runnable_config(config)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
     supervisor_messages = state.get("supervisor_messages", [])
     discovery_iterations = state.get("discovery_iterations", 0)
     
     most_recent_message = supervisor_messages[-1]
     
     # Check exit conditions
-    exceeded_iterations = discovery_iterations > configurable.max_researcher_iterations
+    exceeded_iterations = discovery_iterations > configurable.max_discovery_iterations
     no_tool_calls = not hasattr(most_recent_message, 'tool_calls') or not most_recent_message.tool_calls
     
     if exceeded_iterations or no_tool_calls:
+        # Record exit decision
+        exit_reason = "max_iterations_exceeded" if exceeded_iterations else "no_tool_calls"
+        TraceManager.add_event(
+            event_type=TraceEventType.SUPERVISOR_DECISION,
+            title=f"Supervisor Exit: {exit_reason}",
+            node_name="supervisor_tools",
+            iteration=discovery_iterations,
+            data={"reason": exit_reason, "exceeded_iterations": exceeded_iterations},
+            success=True
+        )
         return Command(goto="synthesize_findings")
     
     # Generate ToolMessage responses for ALL tool calls to satisfy API requirements
@@ -558,6 +750,20 @@ async def supervisor_tools(
             if primary_action is None:
                 primary_action = "gather_knowledge"
                 primary_update["_knowledge_request"] = tool_args.get("knowledge_request", "")
+        
+        elif tool_name == "ExploreData":
+            data_source = tool_args.get("data_source", "").strip()
+            exploration_goal = tool_args.get("exploration_goal", "").strip()
+            
+            all_tool_messages.append(ToolMessage(
+                content=f"Proceeding to explore data source: {data_source}...",
+                name=tool_name,
+                tool_call_id=tool_id
+            ))
+            if primary_action is None:
+                primary_action = "explore_data"
+                primary_update["_exploration_data_source"] = data_source
+                primary_update["_exploration_goal"] = exploration_goal
         
         elif tool_name == "RunExperiment":
             hypothesis = tool_args.get("hypothesis", "").strip()
@@ -628,12 +834,67 @@ async def supervisor_tools(
                 tool_call_id=tool_id
             ))
     
+    # ==========================================================================
+    # TRACEABILITY: Record the supervisor decision
+    # ==========================================================================
+    # Extract reasoning from AI message if available
+    reasoning = ""
+    if hasattr(most_recent_message, 'content') and most_recent_message.content:
+        reasoning = str(most_recent_message.content)[:500]
+    
+    # Build tool call summary for trace
+    tool_call_summary = []
+    for tc in most_recent_message.tool_calls:
+        tool_call_summary.append({
+            "name": tc.get("name"),
+            "args": {k: str(v)[:200] for k, v in tc.get("args", {}).items()}
+        })
+    
+    # Create supervisor decision trace
+    decision_trace = {
+        "timestamp": datetime.now().isoformat(),
+        "iteration": discovery_iterations,
+        "action_chosen": primary_action or "return_to_supervisor",
+        "action_parameters": primary_update,
+        "tool_calls": tool_call_summary,
+        "reasoning": reasoning,
+        "state_summary": {
+            "hypotheses_count": len(state.get("hypotheses", [])),
+            "experiments_count": len(state.get("experiments", [])),
+            "findings_count": len(state.get("findings", [])),
+        }
+    }
+    
+    # Also emit to TraceManager
+    trace_supervisor_decision(
+        iteration=discovery_iterations,
+        action=primary_action or "return_to_supervisor",
+        action_params=primary_update,
+        state_summary=f"Hypotheses: {len(state.get('hypotheses', []))}, Experiments: {len(state.get('experiments', []))}, Findings: {len(state.get('findings', []))}",
+        reasoning=reasoning,
+        tool_calls=tool_call_summary,
+        hypotheses_count=len(state.get("hypotheses", [])),
+        experiments_count=len(state.get("experiments", [])),
+        findings_count=len(state.get("findings", [])),
+    )
+    
     # Determine where to route
     if primary_action == "gather_knowledge":
         return Command(
             goto="gather_knowledge",
             update={
                 "supervisor_messages": all_tool_messages,
+                "supervisor_decision_traces": [decision_trace],
+                **primary_update
+            }
+        )
+    
+    elif primary_action == "explore_data":
+        return Command(
+            goto="explore_data",
+            update={
+                "supervisor_messages": all_tool_messages,
+                "supervisor_decision_traces": [decision_trace],
                 **primary_update
             }
         )
@@ -643,6 +904,7 @@ async def supervisor_tools(
             goto="run_experiment",
             update={
                 "supervisor_messages": all_tool_messages,
+                "supervisor_decision_traces": [decision_trace],
                 **primary_update
             }
         )
@@ -651,14 +913,18 @@ async def supervisor_tools(
         return Command(
             goto="synthesize_findings",
             update={
-                "supervisor_messages": all_tool_messages
+                "supervisor_messages": all_tool_messages,
+                "supervisor_decision_traces": [decision_trace],
             }
         )
     
     # Default: return to supervisor (e.g., if only think_tool was called)
     return Command(
         goto="discovery_supervisor",
-        update={"supervisor_messages": all_tool_messages}
+        update={
+            "supervisor_messages": all_tool_messages,
+            "supervisor_decision_traces": [decision_trace],
+        }
     )
 
 
@@ -670,9 +936,14 @@ async def gather_knowledge(
     
     This node uses scientific tools to gather information needed
     for hypothesis generation and experiment design.
+    
+    KEY IMPROVEMENTS:
+    - Populates papers and data_sources in state (was missing before)
+    - Builds a cumulative knowledge_summary for context management
+    - Extracts structured data from tool results
     """
-    configurable = Configuration.from_runnable_config(config)
-    model_config = get_model_config(configurable, config)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    model_config = get_worker_model_config(configurable, config)
     
     knowledge_request = state.get("_knowledge_request", state.get("research_brief", ""))
     
@@ -702,6 +973,8 @@ async def gather_knowledge(
     
     # Run knowledge gathering loop (limited iterations)
     gathered_info = []
+    new_papers = []
+    new_data_sources = []
     max_iterations = 5
     
     for _ in range(max_iterations):
@@ -717,15 +990,54 @@ async def gather_knowledge(
             if tool:
                 try:
                     result = await tool.ainvoke(tool_call["args"], config)
+                    result_str = str(result)
                     gathered_info.append({
                         "tool": tool_call["name"],
-                        "result": result
+                        "args": tool_call["args"],
+                        "result": result_str
                     })
                     messages.append(ToolMessage(
-                        content=str(result)[:5000],  # Limit size
+                        content=result_str[:5000],
                         name=tool_call["name"],
                         tool_call_id=tool_call["id"]
                     ))
+                    
+                    # Extract structured data from tool results
+                    tool_name = tool_call["name"]
+                    
+                    if tool_name == "search_arxiv_papers":
+                        # Try to extract paper data from ArXiv results
+                        try:
+                            if isinstance(result, str) and "Title:" in result:
+                                # Parse simple text results
+                                for paper_block in result.split("\n\n"):
+                                    title_match = re.search(r'Title:\s*(.+)', paper_block)
+                                    arxiv_match = re.search(r'ArXiv ID:\s*(.+)', paper_block)
+                                    abstract_match = re.search(r'Abstract:\s*(.+)', paper_block, re.DOTALL)
+                                    if title_match:
+                                        new_papers.append(PaperData(
+                                            title=title_match.group(1).strip(),
+                                            arxiv_id=arxiv_match.group(1).strip() if arxiv_match else None,
+                                            abstract=abstract_match.group(1).strip()[:500] if abstract_match else None,
+                                        ))
+                        except Exception as parse_err:
+                            logger.debug(f"Could not parse ArXiv results: {parse_err}")
+                    
+                    elif tool_name in ("query_nasa_exoplanet_archive", "query_mast_archive", "query_sdss_database"):
+                        # Record data source access
+                        source_map = {
+                            "query_nasa_exoplanet_archive": ("NASA Exoplanet Archive", DataSourceType.DATABASE),
+                            "query_mast_archive": ("NASA MAST Archive", DataSourceType.TELESCOPE_ARCHIVE),
+                            "query_sdss_database": ("SDSS", DataSourceType.DATABASE),
+                        }
+                        name, src_type = source_map[tool_name]
+                        new_data_sources.append(ScientificDataSource(
+                            name=name,
+                            source_type=src_type,
+                            query_used=str(tool_call["args"])[:500],
+                            metadata={"result_length": len(result_str)}
+                        ))
+                    
                 except Exception as e:
                     messages.append(ToolMessage(
                         content=f"Error: {str(e)}",
@@ -733,18 +1045,225 @@ async def gather_knowledge(
                         tool_call_id=tool_call["id"]
                     ))
     
-    # Summarize gathered knowledge
-    knowledge_summary = "\n\n".join([
+    # Build knowledge summary
+    raw_summary = "\n\n".join([
         f"[{info['tool']}]\n{info['result'][:2000]}"
         for info in gathered_info
     ])
+    
+    # Accumulate with previous knowledge_summary
+    previous_summary = state.get("knowledge_summary", "")
+    if previous_summary:
+        updated_summary = f"{previous_summary}\n\n--- New Knowledge (Request: {knowledge_request[:100]}) ---\n{raw_summary[:3000]}"
+    else:
+        updated_summary = f"--- Knowledge (Request: {knowledge_request[:100]}) ---\n{raw_summary[:5000]}"
+    
+    # Limit total knowledge summary size
+    if len(updated_summary) > 8000:
+        updated_summary = updated_summary[:8000] + "\n...(truncated)"
     
     return Command(
         goto="discovery_supervisor",
         update={
             "supervisor_messages": [
-                HumanMessage(content=f"Knowledge Gathered:\n{knowledge_summary[:10000]}")
-            ]
+                HumanMessage(content=f"Knowledge Gathered:\n{raw_summary[:10000]}")
+            ],
+            "papers": new_papers,
+            "data_sources": new_data_sources,
+            "knowledge_summary": updated_summary,
+            # Clear the temp field
+            "_knowledge_request": "",
+        }
+    )
+
+
+async def explore_data(
+    state: ComputationalDiscoveryState,
+    config: RunnableConfig
+) -> Command[Literal["discovery_supervisor"]]:
+    """Explore database schemas and APIs before running experiments.
+    
+    This node runs exploratory code to discover:
+    - Available column names in databases
+    - Data types and value ranges
+    - API-specific syntax requirements
+    - Sample data to understand the structure
+    
+    The findings are passed back to the supervisor to inform experiment design.
+    """
+    from open_deep_research.computational.prompts import data_exploration_prompt
+    
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    
+    data_source = state.get("_exploration_data_source", "")
+    exploration_goal = state.get("_exploration_goal", "")
+    
+    if not data_source:
+        return Command(
+            goto="discovery_supervisor",
+            update={
+                "supervisor_messages": [
+                    HumanMessage(content="ExploreData called without data_source. Please specify which database to explore.")
+                ]
+            }
+        )
+    
+    logger.info(f"Exploring data source: {data_source}")
+    logger.info(f"Exploration goal: {exploration_goal}")
+    
+    # Use CODE_FIXER_MODEL for generating exploration code (it's better at coding)
+    code_fixer_model = os.getenv("CODE_FIXER_MODEL", configurable.research_model)
+    
+    # Build exploration prompt
+    context = f"""
+Research Brief: {state.get('research_brief', 'Not available')}
+
+Previous exploration attempts: {len(state.get('data_explorations', []))}
+
+Data source to explore: {data_source}
+"""
+    
+    exploration_prompt = data_exploration_prompt.format(
+        exploration_goal=exploration_goal,
+        context=context
+    )
+    
+    # Get API key for code fixer model
+    code_fixer_api_key = get_api_key_for_model(code_fixer_model, config)
+    
+    # Generate exploration code using the better coding model
+    exploration_model = configurable_model.with_config({
+        "model": code_fixer_model,
+        "max_tokens": 4096,
+        "api_key": code_fixer_api_key,
+        "tags": ["langsmith:nostream"]
+    })
+    
+    try:
+        response = await exploration_model.ainvoke([
+            HumanMessage(content=exploration_prompt)
+        ])
+        
+        # Extract code from response
+        code_content = response.content
+        
+        # Try to extract code from markdown blocks
+        if "```python" in code_content:
+            import re
+            code_blocks = re.findall(r'```python\s*(.*?)```', code_content, re.DOTALL)
+            if code_blocks:
+                exploration_code = max(code_blocks, key=len).strip()
+            else:
+                exploration_code = code_content
+        elif "```" in code_content:
+            import re
+            code_blocks = re.findall(r'```\s*(.*?)```', code_content, re.DOTALL)
+            if code_blocks:
+                exploration_code = max(code_blocks, key=len).strip()
+            else:
+                exploration_code = code_content
+        else:
+            exploration_code = code_content
+        
+        logger.info(f"Generated exploration code: {len(exploration_code)} chars")
+        
+    except Exception as e:
+        logger.error(f"Failed to generate exploration code: {e}")
+        return Command(
+            goto="discovery_supervisor",
+            update={
+                "supervisor_messages": [
+                    HumanMessage(content=f"Failed to generate exploration code: {e}\n\nPlease try ExploreData again or proceed with RunExperiment.")
+                ]
+            }
+        )
+    
+    # Execute exploration code in E2B
+    from open_deep_research.computational.code_interpreter import execute_code
+    
+    exploration_result = await execute_code(
+        code=exploration_code,
+        purpose=f"Explore {data_source}: {exploration_goal}",
+        timeout=120,  # 2 minutes should be enough for exploration
+        config=config
+    )
+    
+    # Format the exploration findings
+    if exploration_result.success:
+        findings = f"""
+## Data Exploration Successful!
+
+**Data Source:** {data_source}
+**Goal:** {exploration_goal}
+
+### Exploration Output:
+```
+{exploration_result.stdout[:8000] if exploration_result.stdout else "No output"}
+```
+
+### Key Findings:
+The exploration code ran successfully. The output above shows:
+- Available column names
+- Sample data values
+- Correct query syntax
+
+**Use these findings when designing your experiment!**
+"""
+        logger.info("Data exploration successful")
+    else:
+        findings = f"""
+## Data Exploration Failed
+
+**Data Source:** {data_source}
+**Goal:** {exploration_goal}
+
+### Error:
+```
+{exploration_result.error_message or "Unknown error"}
+```
+
+### Standard Output (partial):
+```
+{exploration_result.stdout[:3000] if exploration_result.stdout else "No output"}
+```
+
+### Standard Error:
+```
+{exploration_result.stderr[:2000] if exploration_result.stderr else "No errors"}
+```
+
+### Next Steps:
+The exploration failed, but the error message may reveal useful information about:
+- Correct column names (if "invalid identifier" error)
+- Required packages (if import error)
+- API syntax requirements
+
+You can:
+1. Try ExploreData again with a different approach
+2. Proceed with RunExperiment - the code fixer will use this error info to fix queries
+"""
+        logger.warning(f"Data exploration failed: {exploration_result.error_message}")
+    
+    # Store exploration results
+    data_explorations = state.get("data_explorations", [])
+    data_explorations.append({
+        "data_source": data_source,
+        "goal": exploration_goal,
+        "success": exploration_result.success,
+        "findings": findings,
+        "code": exploration_code[:2000]  # Store partial code for reference
+    })
+    
+    return Command(
+        goto="discovery_supervisor",
+        update={
+            "supervisor_messages": [
+                HumanMessage(content=findings)
+            ],
+            "data_explorations": data_explorations,
+            # Clear consumed temp fields
+            "_exploration_data_source": "",
+            "_exploration_goal": "",
         }
     )
 
@@ -761,8 +1280,8 @@ async def run_experiment(
     3. Executes the code in E2B
     4. Captures all outputs
     """
-    configurable = Configuration.from_runnable_config(config)
-    model_config = get_model_config(configurable, config)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    model_config = get_worker_model_config(configurable, config)
     
     hypothesis_text = state.get("_experiment_hypothesis", "").strip()
     experiment_description = state.get("_experiment_description", "").strip()
@@ -783,7 +1302,10 @@ async def run_experiment(
                         "reaction X across temperature range, generate phase diagram')\n\n"
                         "Please call RunExperiment again with BOTH arguments properly filled."
                     ))
-                ]
+                ],
+                # Clear temp fields
+                "_experiment_hypothesis": "",
+                "_experiment_description": "",
             }
         )
     
@@ -799,11 +1321,15 @@ async def run_experiment(
     data_summary = summarize_data_sources(state.get("data_sources", []))
     prev_experiments = summarize_experiments(state.get("experiments", []))
     
+    # Priority 3: Include data exploration findings in experiment design context
+    data_explorations_summary = summarize_data_explorations(state.get("data_explorations", []))
+    
     design_prompt = experiment_design_prompt.format(
         date=get_today_str(),
         hypothesis=hypothesis_text,
         available_data=f"Papers:\n{papers_summary}\n\nData Sources:\n{data_summary}",
-        previous_experiments=prev_experiments
+        previous_experiments=prev_experiments,
+        data_explorations=data_explorations_summary
     )
     
     # Try structured output first, fall back to manual parsing for models that don't support it
@@ -1020,18 +1546,91 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
         code_executed=experiment_plan.python_code
     )
     
+    # ==========================================================================
+    # TRACEABILITY: Record hypothesis and experiment start
+    # ==========================================================================
+    trace_hypothesis_created(
+        hypothesis_id=hypothesis.id,
+        statement=hypothesis_text,
+        rationale=experiment_description
+    )
+    
+    trace_experiment_started(
+        experiment_id=experiment.id,
+        hypothesis_id=hypothesis.id,
+        objective=experiment_plan.objective
+    )
+    
+    # Store experiment design for traceability
+    experiment_trace_events = [{
+        "event_type": "experiment_designed",
+        "timestamp": datetime.now().isoformat(),
+        "title": f"Experiment Designed: {experiment_plan.objective[:80]}",
+        "experiment_id": experiment.id,
+        "hypothesis_id": hypothesis.id,
+        "data": {
+            "objective": experiment_plan.objective,
+            "expected_outputs": experiment_plan.expected_outputs,
+            "interpretation_guide": experiment_plan.interpretation_guide[:500],
+            "code_length": len(experiment_plan.python_code),
+        }
+    }]
+    
     # Execute with retry loop for code fixing
     current_code = experiment_plan.python_code
-    max_fix_attempts = 3
+    max_fix_attempts = int(os.getenv("MAX_CODE_FIX_ATTEMPTS", "3"))
     computation_result = None
+    code_execution_traces = []  # Track all execution attempts
+    
+    # Priority 7: Use persistent sandbox if configured
+    sandbox_id = state.get("sandbox_id") if configurable.use_persistent_sandbox else None
     
     for attempt in range(max_fix_attempts + 1):
-        # Execute the experiment in E2B
+        execution_start_time = datetime.now()
+        
+        # Execute the experiment in E2B with persistent sandbox
         computation_result = await execute_experiment(
             experiment_code=current_code,
             experiment_id=experiment.id,
             hypothesis=hypothesis_text,
+            sandbox_id=sandbox_id,
             config=config
+        )
+        
+        execution_time = (datetime.now() - execution_start_time).total_seconds()
+        
+        # ==========================================================================
+        # TRACEABILITY: Record code execution attempt
+        # ==========================================================================
+        code_exec_trace = {
+            "timestamp": datetime.now().isoformat(),
+            "attempt_number": attempt + 1,
+            "code": current_code,
+            "purpose": f"Test hypothesis: {hypothesis_text[:200]}",
+            "success": computation_result.success,
+            "execution_time_seconds": execution_time,
+            "stdout": computation_result.stdout[:5000] if computation_result.stdout else "",
+            "stderr": computation_result.stderr[:2000] if computation_result.stderr else "",
+            "error_message": computation_result.error_message,
+            "experiment_id": experiment.id,
+            "hypothesis_id": hypothesis.id,
+            "output_ids": [o.id for o in computation_result.outputs],
+        }
+        code_execution_traces.append(code_exec_trace)
+        
+        # Also emit to TraceManager
+        trace_code_execution(
+            code=current_code,
+            purpose=f"Test hypothesis: {hypothesis_text[:200]}",
+            success=computation_result.success,
+            stdout=computation_result.stdout or "",
+            stderr=computation_result.stderr or "",
+            error_message=computation_result.error_message,
+            execution_time=execution_time,
+            attempt_number=attempt + 1,
+            experiment_id=experiment.id,
+            hypothesis_id=hypothesis.id,
+            output_ids=[o.id for o in computation_result.outputs],
         )
         
         # If successful, break out of retry loop
@@ -1079,9 +1678,20 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
             try:
                 from .prompts import code_fix_prompt
                 
+                # Include data exploration findings in the fix context
+                exploration_context = ""
+                data_explorations = state.get("data_explorations", [])
+                if data_explorations:
+                    successful_explorations = [e for e in data_explorations if e.get("success")]
+                    if successful_explorations:
+                        exploration_context = "\n\n## DATA EXPLORATION FINDINGS (use these correct column names!):\n"
+                        for exp in successful_explorations[-2:]:  # Last 2 successful explorations
+                            exploration_context += f"Source: {exp.get('data_source', '')}\n"
+                            exploration_context += f"{exp.get('findings', '')[:1500]}\n\n"
+                
                 fix_prompt = code_fix_prompt.format(
                     hypothesis=hypothesis_text,
-                    purpose=experiment_description,
+                    purpose=experiment_description + exploration_context,
                     original_code=current_code,
                     error_message=computation_result.error_message or "Unknown error",
                     stdout=stdout_text or "(empty)",
@@ -1133,6 +1743,33 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
                 if fixed_code and len(fixed_code) > 50:
                     print(f"AI generated fix: {len(fixed_code)} chars, {fixed_code.count(chr(10))} lines")
                     logger.info(f"AI generated fix (attempt {attempt + 2}): {len(fixed_code)} chars")
+                    
+                    # ==========================================================================
+                    # TRACEABILITY: Record code fix attempt
+                    # ==========================================================================
+                    fix_trace = {
+                        "timestamp": datetime.now().isoformat(),
+                        "event_type": "code_fix_attempt",
+                        "attempt_number": attempt + 2,
+                        "original_error": computation_result.error_message,
+                        "fix_model": code_fixer_model_name or configurable.research_model,
+                        "original_code_length": len(current_code),
+                        "fixed_code_length": len(fixed_code),
+                    }
+                    experiment_trace_events.append(fix_trace)
+                    
+                    TraceManager.add_event(
+                        event_type=TraceEventType.CODE_FIX_ATTEMPT,
+                        title=f"Code Fix Generated (Attempt #{attempt + 2})",
+                        node_name="run_experiment",
+                        experiment_id=experiment.id,
+                        data={
+                            "original_error": computation_result.error_message[:500] if computation_result.error_message else None,
+                            "fix_model": code_fixer_model_name or configurable.research_model,
+                            "code_length_change": len(fixed_code) - len(current_code),
+                        }
+                    )
+                    
                     current_code = fixed_code
                     experiment.code_executed = current_code  # Update with fixed code
                 else:
@@ -1249,6 +1886,31 @@ Description: {experiment_description}
     
     logger.info(f"Total outputs after merge: {len(merged_outputs)}")
     
+    # ==========================================================================
+    # TRACEABILITY: Record outputs generated
+    # ==========================================================================
+    for output in computation_result.outputs:
+        trace_output_generated(
+            output_id=output.id,
+            output_type=output.output_type.value,
+            description=output.description
+        )
+    
+    # Add experiment completion event
+    experiment_trace_events.append({
+        "event_type": "experiment_completed",
+        "timestamp": datetime.now().isoformat(),
+        "title": f"Experiment {'Succeeded' if computation_result.success else 'Failed'}: {experiment_plan.objective[:60]}",
+        "experiment_id": experiment.id,
+        "hypothesis_id": hypothesis.id,
+        "success": computation_result.success,
+        "data": {
+            "total_attempts": len(code_execution_traces),
+            "outputs_generated": len(computation_result.outputs),
+            "quality_score": quality.get("quality_score", 0),
+        }
+    })
+    
     return Command(
         goto="analyze_results",
         update={
@@ -1261,7 +1923,15 @@ Description: {experiment_description}
             "_current_experiment": experiment,
             "_current_hypothesis": hypothesis,
             "_experiment_quality": quality,
-            "_quality_message": quality_message
+            "_quality_message": quality_message,
+            # Clear consumed temp fields
+            "_experiment_hypothesis": "",
+            "_experiment_description": "",
+            # Store sandbox_id for persistent sandbox reuse
+            "sandbox_id": sandbox_id,
+            # Traceability data
+            "trace_events": experiment_trace_events,
+            "code_execution_traces": code_execution_traces,
         }
     )
 
@@ -1278,8 +1948,8 @@ async def analyze_results(
     3. Creates findings
     4. Suggests next steps
     """
-    configurable = Configuration.from_runnable_config(config)
-    model_config = get_model_config(configurable, config)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    model_config = get_worker_model_config(configurable, config)
     
     experiment = state.get("_current_experiment")
     hypothesis = state.get("_current_hypothesis")
@@ -1355,9 +2025,13 @@ async def analyze_results(
         if quality.get('warnings'):
             quality_context += "- Warnings: " + "; ".join(quality['warnings']) + "\n"
     
-    # Build analysis prompt
+    # Build analysis prompt with research context and previous findings
+    previous_findings_text = summarize_findings(state.get("findings", []))
+    
     analysis_prompt = result_analysis_prompt.format(
         date=get_today_str(),
+        research_brief=state.get("research_brief", "Not available")[:2000],
+        previous_findings=previous_findings_text,
         hypothesis=hypothesis.statement,
         experiment_design=f"Objective: {experiment.design.objective}\nMethodology: {experiment.design.methodology}",
         computation_results=computation_results[0].to_ai_summary() if computation_results else "No results",
@@ -1531,14 +2205,41 @@ REFINED_HYPOTHESIS: [If yes above, provide refined hypothesis. If no, write "N/A
     experiment.supports_hypothesis = analysis.supports_hypothesis
     experiment.status = ExperimentStatus.ANALYZING
     
+    # Determine novelty based on actual criteria:
+    # A finding is novel if it reveals something unexpected or previously unknown,
+    # NOT simply because the hypothesis was refuted.
+    # Novel findings include: unexpected patterns, statistically significant results,
+    # new correlations, or results that contradict established literature.
+    is_novel = (
+        analysis.confidence_level == "high"  # Strong evidence for any conclusion
+        or analysis.should_refine_hypothesis  # Led to hypothesis refinement (new insight)
+        or (not analysis.supports_hypothesis and analysis.confidence_level == "medium")  # Confident refutation
+    )
+    
+    # Capture statistical evidence from key insights
+    statistical_evidence = ""
+    for insight in analysis.key_insights:
+        if any(term in insight.lower() for term in ["p-value", "p =", "correlation", "significant", "confidence"]):
+            statistical_evidence += insight + "; "
+    
     # Create finding
     finding = Finding(
         statement=analysis.findings_summary,
         significance=", ".join(analysis.key_insights),
+        statistical_evidence=statistical_evidence.strip("; ") if statistical_evidence else None,
         supporting_experiments=[experiment.id],
         supporting_outputs=[o.id for o in all_outputs if o.output_type in [OutputType.IMAGE, OutputType.STATISTICAL_RESULT]],
-        is_novel=not analysis.supports_hypothesis,  # Refuting existing belief is novel
+        is_novel=is_novel,
         visualization_ids=[o.id for o in all_outputs if o.output_type == OutputType.IMAGE]
+    )
+    
+    # ==========================================================================
+    # TRACEABILITY: Record finding
+    # ==========================================================================
+    trace_finding_recorded(
+        finding_id=finding.id,
+        statement=analysis.findings_summary,
+        is_novel=finding.is_novel
     )
     
     # Build summary for supervisor
@@ -1585,13 +2286,43 @@ REFINED_HYPOTHESIS: [If yes above, provide refined hypothesis. If no, write "N/A
     if quality_message:
         summary_parts.append(quality_message)
     
+    # ==========================================================================
+    # TRACEABILITY: Record analysis completion
+    # ==========================================================================
+    analysis_trace = {
+        "event_type": "analysis_completed",
+        "timestamp": datetime.now().isoformat(),
+        "title": f"Analysis Complete: {'Supported' if analysis.supports_hypothesis else 'Not Supported'}",
+        "experiment_id": experiment.id,
+        "hypothesis_id": hypothesis.id,
+        "data": {
+            "supports_hypothesis": analysis.supports_hypothesis,
+            "confidence_level": analysis.confidence_level,
+            "key_insights": analysis.key_insights,
+            "recommended_next_steps": analysis.recommended_next_steps,
+            "finding_statement": analysis.findings_summary[:500],
+            "quality_score": quality.get("quality_score", 0) if quality else 0,
+        }
+    }
+    
+    # Extract recommended next steps as new questions for discovery tracking
+    new_questions = [step for step in analysis.recommended_next_steps if step]
+    
     return Command(
         goto="discovery_supervisor",
         update={
             "findings": [finding],
+            "new_questions": new_questions,
             "supervisor_messages": [
                 HumanMessage(content="\n".join(summary_parts))
-            ]
+            ],
+            # Clear consumed temp fields
+            "_current_experiment": None,
+            "_current_hypothesis": None,
+            "_experiment_quality": {},
+            "_quality_message": "",
+            # Traceability data
+            "trace_events": [analysis_trace],
         }
     )
 
@@ -1608,9 +2339,7 @@ async def synthesize_findings(
     IMPORTANT: Will redirect back to supervisor if insufficient experiments
     have been run (requires at least 1 experiment with outputs).
     """
-    configurable = Configuration.from_runnable_config(config)
-    model_config = get_model_config(configurable, config)
-    
+    configurable = ComputationalConfiguration.from_runnable_config(config)
     # Get all components
     research_brief = state.get("research_brief", "")
     hypotheses = state.get("hypotheses", [])
@@ -1623,7 +2352,7 @@ async def synthesize_findings(
     # Check if we have sufficient computational evidence
     # If not, redirect back to supervisor to run more experiments
     # (unless we've hit max iterations)
-    max_iterations = configurable.max_researcher_iterations
+    max_iterations = configurable.max_discovery_iterations
     has_experiments = len(experiments) > 0
     has_outputs = len(all_outputs) > 0
     has_computation_results = len(computation_results) > 0
@@ -1747,10 +2476,58 @@ An error occurred during report synthesis: {str(e)}
     if sandbox_id:
         SandboxManager.close_sandbox(sandbox_id)
     
+    # ==========================================================================
+    # TRACEABILITY: Finalize the trace
+    # ==========================================================================
+    # Calculate summary statistics
+    total_duration = 0
+    trace_started = state.get("trace_started_at")
+    if trace_started:
+        try:
+            from datetime import datetime as dt
+            start_time = dt.fromisoformat(trace_started)
+            total_duration = (datetime.now() - start_time).total_seconds()
+        except:
+            pass
+    
+    # Create final trace event
+    final_trace_event = {
+        "event_type": "report_generated",
+        "timestamp": datetime.now().isoformat(),
+        "title": "Final Report Generated",
+        "data": {
+            "report_length": len(final_report),
+            "total_hypotheses": len(hypotheses),
+            "total_experiments": len(experiments),
+            "total_findings": len(findings),
+            "total_outputs": len(all_outputs),
+            "total_duration_seconds": total_duration,
+            "total_iterations": discovery_iterations,
+        },
+        "success": True
+    }
+    
+    # Finalize TraceManager
+    TraceManager.add_event(
+        event_type=TraceEventType.REPORT_GENERATED,
+        title="Final Report Generated",
+        node_name="synthesize_findings",
+        data={
+            "report_length": len(final_report),
+            "total_hypotheses": len(hypotheses),
+            "total_experiments": len(experiments),
+            "total_findings": len(findings),
+        },
+        success=True
+    )
+    TraceManager.finalize(final_report)
+    
     return Command(
         goto=END,
         update={
             "final_report": final_report,
-            "messages": [AIMessage(content=final_report)]
+            "messages": [AIMessage(content=final_report)],
+            # Final traceability data
+            "trace_events": [final_trace_event],
         }
     )

@@ -3,6 +3,10 @@
 This module defines the state models that track the entire scientific discovery
 workflow, from hypothesis generation through computational experimentation
 to final synthesis of findings.
+
+TRACEABILITY NOTE:
+The state includes trace_events for capturing the research process in a way
+that enables human (or AI) review and replication of the research.
 """
 
 import operator
@@ -456,6 +460,7 @@ class ComputationalDiscoveryState(MessagesState):
     # Research context
     research_query: str = ""
     research_brief: str = ""
+    scientific_domain: str = "general"  # Domain for adaptive prompts
     
     # Hypothesis tracking
     hypotheses: Annotated[List[HypothesisRecord], override_or_append_reducer] = []
@@ -465,6 +470,11 @@ class ComputationalDiscoveryState(MessagesState):
     papers: Annotated[List[PaperData], override_or_append_reducer] = []
     data_sources: Annotated[List[ScientificDataSource], override_or_append_reducer] = []
     extracted_equations: Annotated[List[ExtractedEquation], override_or_append_reducer] = []
+    data_explorations: Annotated[List[Dict[str, Any]], override_or_append_reducer] = []  # Schema exploration results
+    
+    # Accumulated knowledge summary - compressed, structured knowledge base
+    # Updated after each gather_knowledge call with a refined summary
+    knowledge_summary: str = ""
     
     # Computational layer - E2B managed
     sandbox_id: Optional[str] = None  # For persistent sandbox
@@ -491,9 +501,12 @@ class ComputationalDiscoveryState(MessagesState):
     supervisor_messages: Annotated[List[MessageLikeRepresentation], override_or_append_reducer] = []
     
     # Temporary routing fields (used to pass data between nodes)
+    # These are cleared at the start of each consuming node
     _experiment_hypothesis: str = ""
     _experiment_description: str = ""
     _knowledge_request: str = ""
+    _exploration_data_source: str = ""  # Data source to explore
+    _exploration_goal: str = ""  # What to discover about the data source
     
     # Current experiment/hypothesis being processed (passed between nodes)
     _current_experiment: Optional["ExperimentRecord"] = None
@@ -502,6 +515,32 @@ class ComputationalDiscoveryState(MessagesState):
     # Experiment quality tracking (populated by run_experiment)
     _experiment_quality: Dict[str, Any] = {}  # Quality validation results
     _quality_message: str = ""  # Quality warnings and suggestions
+    
+    # ==========================================================================
+    # TRACEABILITY - Captures the entire research process for review/replication
+    # ==========================================================================
+    
+    # Trace events - serializable list of all events that occurred during research
+    # Each event is a dict with: event_type, timestamp, title, description, data, etc.
+    trace_events: Annotated[List[Dict[str, Any]], override_or_append_reducer] = []
+    
+    # Code execution traces - detailed records of all code executions including:
+    # - The code that was executed
+    # - Attempt number (for retries)
+    # - Success/failure status
+    # - stdout/stderr
+    # - Error messages and fix reasoning
+    code_execution_traces: Annotated[List[Dict[str, Any]], override_or_append_reducer] = []
+    
+    # Supervisor decision traces - records of all supervisor decisions including:
+    # - What action was chosen and why
+    # - State at decision time
+    # - Tool calls made
+    supervisor_decision_traces: Annotated[List[Dict[str, Any]], override_or_append_reducer] = []
+    
+    # Trace metadata
+    trace_id: str = ""  # Unique identifier for this research trace
+    trace_started_at: Optional[str] = None  # ISO timestamp
 
 
 class ExperimentDesignerState(TypedDict):

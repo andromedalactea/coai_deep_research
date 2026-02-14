@@ -37,6 +37,12 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import traceability system
+from open_deep_research.computational.traceability import (
+    TraceManager,
+    ResearchTrace,
+)
+
 
 # =============================================================================
 # Progress Callback - Monitor Discovery in Real-Time
@@ -253,6 +259,15 @@ async def run_discovery_with_monitoring(
     from open_deep_research.computational.discovery_graph import computational_discovery
     from langchain_core.messages import HumanMessage
     
+    # ==========================================================================
+    # TRACEABILITY: Initialize the research trace
+    # ==========================================================================
+    trace = TraceManager.start_trace(
+        research_query=query,
+        config=config
+    )
+    print(f"\n🔍 Trace ID: {trace.trace_id}")
+    
     # Initialize monitor
     monitor = DiscoveryMonitor(verbose=verbose)
     monitor.start()
@@ -301,19 +316,696 @@ async def run_discovery_with_monitoring(
     return final_result
 
 
+async def save_research_trace(result: dict, run_dir: Path, timestamp: str):
+    """Save comprehensive research trace for traceability and reproducibility.
+    
+    Creates:
+    - trace_{timestamp}.json: Complete JSON trace for programmatic access
+    - trace_{timestamp}.md: Human-readable markdown trace
+    - trace_{timestamp}.html: Interactive HTML trace viewer
+    - code_executions/: Directory with individual code execution files
+    """
+    
+    print(f"\n📜 Saving Research Trace (for human/AI review)...")
+    
+    # Build comprehensive trace from state data
+    trace_data = {
+        "trace_id": result.get("trace_id", ""),
+        "timestamp": timestamp,
+        "created_at": result.get("trace_started_at", datetime.now().isoformat()),
+        "completed_at": datetime.now().isoformat(),
+        
+        # Research context
+        "research_query": result.get("research_query", ""),
+        "research_brief": result.get("research_brief", ""),
+        
+        # Timeline of events
+        "events": result.get("trace_events", []),
+        
+        # Code execution traces (most important for reproducibility)
+        "code_executions": result.get("code_execution_traces", []),
+        
+        # Supervisor decision traces
+        "supervisor_decisions": result.get("supervisor_decision_traces", []),
+        
+        # Summary statistics
+        "summary": {
+            "total_iterations": result.get("discovery_iterations", 0),
+            "total_code_executions": len(result.get("code_execution_traces", [])),
+            "successful_code_executions": sum(
+                1 for ce in result.get("code_execution_traces", []) 
+                if ce.get("success", False)
+            ),
+            "total_hypotheses": len(result.get("hypotheses", [])),
+            "total_experiments": len(result.get("experiments", [])),
+            "total_findings": len(result.get("findings", [])),
+            "total_outputs": len(result.get("all_outputs", {})),
+        },
+        
+        # Detailed records
+        "hypotheses": [],
+        "experiments": [],
+        "findings": [],
+        
+        # Final report
+        "final_report": result.get("final_report", ""),
+    }
+    
+    # Process hypotheses
+    for h in result.get("hypotheses", []):
+        if hasattr(h, 'statement'):
+            trace_data["hypotheses"].append({
+                "id": h.id,
+                "statement": h.statement,
+                "rationale": h.rationale,
+                "status": h.status.value if hasattr(h.status, 'value') else str(h.status),
+                "supporting_evidence": h.supporting_evidence,
+            })
+        elif isinstance(h, dict):
+            trace_data["hypotheses"].append(h)
+    
+    # Process experiments
+    for exp in result.get("experiments", []):
+        if hasattr(exp, 'id'):
+            exp_data = {
+                "id": exp.id,
+                "hypothesis_id": exp.hypothesis_id,
+                "objective": exp.design.objective if exp.design else "",
+                "methodology": exp.design.methodology if exp.design else "",
+                "status": exp.status.value if hasattr(exp.status, 'value') else str(exp.status),
+                "code_executed": exp.code_executed,
+                "findings_summary": exp.findings_summary,
+                "supports_hypothesis": exp.supports_hypothesis,
+            }
+            trace_data["experiments"].append(exp_data)
+        elif isinstance(exp, dict):
+            trace_data["experiments"].append(exp)
+    
+    # Process findings
+    for f in result.get("findings", []):
+        if hasattr(f, 'statement'):
+            trace_data["findings"].append({
+                "id": f.id,
+                "statement": f.statement,
+                "significance": f.significance,
+                "is_novel": f.is_novel,
+                "supporting_experiments": f.supporting_experiments,
+                "visualization_ids": f.visualization_ids,
+            })
+        elif isinstance(f, dict):
+            trace_data["findings"].append(f)
+    
+    # ==========================================================================
+    # Save JSON trace (for programmatic access)
+    # ==========================================================================
+    json_trace_path = run_dir / f"trace_{timestamp}.json"
+    with open(json_trace_path, "w") as f:
+        json.dump(trace_data, f, indent=2, default=str)
+    print(f"   📊 JSON Trace: {json_trace_path}")
+    
+    # ==========================================================================
+    # Save Markdown trace (human-readable)
+    # ==========================================================================
+    md_trace = generate_markdown_trace(trace_data)
+    md_trace_path = run_dir / f"trace_{timestamp}.md"
+    with open(md_trace_path, "w") as f:
+        f.write(md_trace)
+    print(f"   📝 Markdown Trace: {md_trace_path}")
+    
+    # ==========================================================================
+    # Save HTML trace (interactive viewer)
+    # ==========================================================================
+    html_trace = generate_html_trace(trace_data)
+    html_trace_path = run_dir / f"trace_{timestamp}.html"
+    with open(html_trace_path, "w") as f:
+        f.write(html_trace)
+    print(f"   🌐 HTML Trace: {html_trace_path}")
+    
+    # ==========================================================================
+    # Save individual code execution files (for easy review/replication)
+    # ==========================================================================
+    code_dir = run_dir / "code_executions"
+    code_dir.mkdir(exist_ok=True)
+    
+    code_executions = result.get("code_execution_traces", [])
+    for i, ce in enumerate(code_executions):
+        code_file = code_dir / f"execution_{i+1:02d}_{'success' if ce.get('success') else 'failed'}.py"
+        
+        # Build code file with metadata header
+        code_content = f'''"""
+Code Execution #{i+1}
+==================
+Timestamp: {ce.get('timestamp', 'N/A')}
+Attempt: #{ce.get('attempt_number', 1)}
+Purpose: {ce.get('purpose', 'N/A')}
+Status: {'SUCCESS' if ce.get('success') else 'FAILED'}
+Experiment ID: {ce.get('experiment_id', 'N/A')}
+Hypothesis ID: {ce.get('hypothesis_id', 'N/A')}
+Execution Time: {ce.get('execution_time_seconds', 0):.2f}s
+'''
+        
+        if not ce.get('success') and ce.get('error_message'):
+            code_content += f'''
+Error Message:
+{ce.get('error_message', '')}
+'''
+        
+        code_content += f'''
+Output IDs: {ce.get('output_ids', [])}
+"""
+
+# =============================================================================
+# EXECUTED CODE
+# =============================================================================
+
+{ce.get('code', '# No code recorded')}
+'''
+        
+        # Add stdout/stderr as comments at the end
+        if ce.get('stdout'):
+            stdout_preview = ce.get('stdout')[:3000]
+            if len(ce.get('stdout', '')) > 3000:
+                stdout_preview += f"\n... (truncated, {len(ce.get('stdout'))} total chars)"
+            code_content += f'''
+
+# =============================================================================
+# STANDARD OUTPUT
+# =============================================================================
+"""
+{stdout_preview}
+"""
+'''
+        
+        if ce.get('stderr'):
+            code_content += f'''
+
+# =============================================================================
+# STANDARD ERROR
+# =============================================================================
+"""
+{ce.get('stderr')[:2000]}
+"""
+'''
+        
+        with open(code_file, "w") as f:
+            f.write(code_content)
+    
+    if code_executions:
+        print(f"   💻 Code Executions: {code_dir}/ ({len(code_executions)} files)")
+
+
+def generate_markdown_trace(trace_data: dict) -> str:
+    """Generate a human-readable markdown trace document."""
+    
+    lines = [
+        "# Research Traceability Report",
+        "",
+        f"**Trace ID:** `{trace_data.get('trace_id', 'N/A')}`",
+        f"**Created:** {trace_data.get('created_at', 'N/A')}",
+        f"**Completed:** {trace_data.get('completed_at', 'N/A')}",
+        "",
+        "---",
+        "",
+        "## Summary Statistics",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+    ]
+    
+    summary = trace_data.get("summary", {})
+    lines.extend([
+        f"| Total Iterations | {summary.get('total_iterations', 0)} |",
+        f"| Total Code Executions | {summary.get('total_code_executions', 0)} |",
+        f"| Successful Executions | {summary.get('successful_code_executions', 0)} |",
+        f"| Total Hypotheses | {summary.get('total_hypotheses', 0)} |",
+        f"| Total Experiments | {summary.get('total_experiments', 0)} |",
+        f"| Total Findings | {summary.get('total_findings', 0)} |",
+        f"| Total Outputs | {summary.get('total_outputs', 0)} |",
+        "",
+        "---",
+        "",
+        "## Research Query",
+        "",
+        trace_data.get("research_query", "*No query recorded*"),
+        "",
+    ])
+    
+    if trace_data.get("research_brief"):
+        lines.extend([
+            "## Research Brief",
+            "",
+            trace_data.get("research_brief"),
+            "",
+        ])
+    
+    # Hypotheses
+    if trace_data.get("hypotheses"):
+        lines.extend([
+            "---",
+            "",
+            "## Hypotheses Tested",
+            "",
+        ])
+        for h in trace_data.get("hypotheses", []):
+            status = h.get("status", "unknown")
+            status_emoji = {"supported": "✅", "refuted": "❌", "testing": "🔬"}.get(status, "❓")
+            lines.extend([
+                f"### {status_emoji} {h.get('statement', 'Unknown')[:100]}",
+                "",
+                f"**Status:** {status}",
+                "",
+                f"**Rationale:** {h.get('rationale', 'N/A')}",
+                "",
+            ])
+    
+    # Experiments
+    if trace_data.get("experiments"):
+        lines.extend([
+            "---",
+            "",
+            "## Experiments Conducted",
+            "",
+        ])
+        for exp in trace_data.get("experiments", []):
+            status = exp.get("status", "unknown")
+            lines.extend([
+                f"### Experiment: {exp.get('objective', 'Unknown')[:80]}",
+                "",
+                f"**ID:** `{exp.get('id', 'N/A')}`",
+                f"**Status:** {status}",
+                f"**Supports Hypothesis:** {exp.get('supports_hypothesis', 'N/A')}",
+                "",
+                "**Methodology:**",
+                exp.get('methodology', 'N/A')[:500],
+                "",
+                "**Findings Summary:**",
+                exp.get('findings_summary', 'N/A')[:500] if exp.get('findings_summary') else 'N/A',
+                "",
+            ])
+    
+    # Code Executions
+    if trace_data.get("code_executions"):
+        lines.extend([
+            "---",
+            "",
+            "## Code Execution History",
+            "",
+            "All code executions are saved in the `code_executions/` directory for review and replication.",
+            "",
+        ])
+        for i, ce in enumerate(trace_data.get("code_executions", [])):
+            success = ce.get("success", False)
+            status_emoji = "✅" if success else "❌"
+            lines.extend([
+                f"### {status_emoji} Execution #{i+1} (Attempt #{ce.get('attempt_number', 1)})",
+                "",
+                f"**Timestamp:** {ce.get('timestamp', 'N/A')}",
+                f"**Purpose:** {ce.get('purpose', 'N/A')[:200]}",
+                f"**Status:** {'SUCCESS' if success else 'FAILED'}",
+                f"**Execution Time:** {ce.get('execution_time_seconds', 0):.2f}s",
+                "",
+            ])
+            
+            if not success and ce.get("error_message"):
+                lines.extend([
+                    "**Error:**",
+                    "```",
+                    ce.get("error_message", "")[:500],
+                    "```",
+                    "",
+                ])
+            
+            # Code preview (first 50 lines)
+            code = ce.get("code", "")
+            code_lines = code.split("\n")
+            if len(code_lines) > 50:
+                code_preview = "\n".join(code_lines[:50]) + f"\n... ({len(code_lines)} total lines)"
+            else:
+                code_preview = code
+            
+            lines.extend([
+                "**Code:**",
+                "```python",
+                code_preview,
+                "```",
+                "",
+            ])
+    
+    # Supervisor Decisions
+    if trace_data.get("supervisor_decisions"):
+        lines.extend([
+            "---",
+            "",
+            "## Supervisor Decision Trail",
+            "",
+        ])
+        for dec in trace_data.get("supervisor_decisions", []):
+            lines.extend([
+                f"### Iteration {dec.get('iteration', 'N/A')}: {dec.get('action_chosen', 'Unknown')}",
+                "",
+                f"**Timestamp:** {dec.get('timestamp', 'N/A')}",
+                "",
+            ])
+            
+            state_summary = dec.get("state_summary", {})
+            if isinstance(state_summary, dict):
+                lines.extend([
+                    "**State at Decision:**",
+                    f"- Hypotheses: {state_summary.get('hypotheses_count', 0)}",
+                    f"- Experiments: {state_summary.get('experiments_count', 0)}",
+                    f"- Findings: {state_summary.get('findings_count', 0)}",
+                    "",
+                ])
+            
+            if dec.get("reasoning"):
+                lines.extend([
+                    "**Reasoning:**",
+                    dec.get("reasoning", "")[:500],
+                    "",
+                ])
+    
+    # Findings
+    if trace_data.get("findings"):
+        lines.extend([
+            "---",
+            "",
+            "## Key Findings",
+            "",
+        ])
+        for f in trace_data.get("findings", []):
+            novelty = "🆕 " if f.get("is_novel") else ""
+            lines.extend([
+                f"### {novelty}{f.get('statement', 'Unknown')[:100]}",
+                "",
+                f"**Significance:** {f.get('significance', 'N/A')}",
+                f"**Supporting Experiments:** {f.get('supporting_experiments', [])}",
+                "",
+            ])
+    
+    lines.extend([
+        "---",
+        "",
+        "*This trace was automatically generated to enable human review and replication of the AI research process.*",
+    ])
+    
+    return "\n".join(lines)
+
+
+def generate_html_trace(trace_data: dict) -> str:
+    """Generate an interactive HTML trace viewer."""
+    import html as html_lib
+    
+    summary = trace_data.get("summary", {})
+    
+    html_parts = [
+        "<!DOCTYPE html>",
+        "<html lang='en'>",
+        "<head>",
+        "<meta charset='UTF-8'>",
+        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
+        f"<title>Research Trace - {trace_data.get('trace_id', 'Unknown')}</title>",
+        "<style>",
+        """
+        :root { --primary: #4361ee; --success: #2ecc71; --danger: #e74c3c; --dark: #1a1a2e; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+               max-width: 1400px; margin: 0 auto; padding: 20px; background: #f5f6fa; }
+        .container { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1 { color: var(--dark); border-bottom: 3px solid var(--primary); padding-bottom: 10px; }
+        h2 { color: var(--dark); margin-top: 30px; display: flex; align-items: center; gap: 10px; }
+        h2::before { content: ''; width: 4px; height: 24px; background: var(--primary); }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        .stat-card { background: linear-gradient(135deg, var(--primary), #3a0ca3); color: white; padding: 20px; border-radius: 10px; }
+        .stat-card h3 { margin: 0; font-size: 2em; }
+        .stat-card p { margin: 5px 0 0 0; opacity: 0.9; }
+        .code-block { background: #2d3436; color: #dfe6e9; padding: 15px; border-radius: 8px; overflow-x: auto; 
+                      font-family: 'Monaco', 'Menlo', monospace; font-size: 0.85em; white-space: pre-wrap; }
+        .event { background: #f8f9fa; border-left: 4px solid var(--primary); padding: 15px; margin: 10px 0; border-radius: 0 8px 8px 0; }
+        .event.success { border-left-color: var(--success); }
+        .event.failure { border-left-color: var(--danger); }
+        .event-header { display: flex; justify-content: space-between; align-items: center; }
+        .event-title { font-weight: bold; color: var(--dark); }
+        .event-time { color: #666; font-size: 0.85em; }
+        .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.8em; color: white; }
+        .badge-success { background: var(--success); }
+        .badge-danger { background: var(--danger); }
+        .badge-primary { background: var(--primary); }
+        .collapsible { cursor: pointer; padding: 15px; background: #e8e8e8; border: none; width: 100%; 
+                       text-align: left; font-size: 1em; border-radius: 8px; margin: 5px 0; display: flex; 
+                       justify-content: space-between; align-items: center; }
+        .collapsible:hover { background: #ddd; }
+        .collapsible::after { content: '+'; font-size: 1.5em; color: var(--primary); }
+        .collapsible.active::after { content: '-'; }
+        .content { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-out; }
+        .tabs { display: flex; gap: 5px; margin-bottom: 20px; flex-wrap: wrap; }
+        .tab { padding: 10px 20px; cursor: pointer; background: #e8e8e8; border: none; border-radius: 8px 8px 0 0; }
+        .tab.active { background: var(--primary); color: white; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .hypothesis-card, .experiment-card, .finding-card { 
+            background: white; border: 1px solid #e0e0e0; border-radius: 10px; padding: 20px; margin: 15px 0; }
+        .status-supported { color: var(--success); }
+        .status-refuted { color: var(--danger); }
+        .timeline { position: relative; padding-left: 30px; }
+        .timeline::before { content: ''; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px; background: var(--primary); }
+        .timeline-item { position: relative; margin: 20px 0; }
+        .timeline-item::before { content: ''; position: absolute; left: -24px; top: 5px; width: 10px; height: 10px; 
+                                  background: var(--primary); border-radius: 50%; }
+        """,
+        "</style>",
+        "</head>",
+        "<body>",
+        "<div class='container'>",
+        f"<h1>🔬 Research Traceability Report</h1>",
+        f"<p><strong>Trace ID:</strong> <code>{trace_data.get('trace_id', 'N/A')}</code></p>",
+        f"<p><strong>Created:</strong> {trace_data.get('created_at', 'N/A')}</p>",
+        f"<p><strong>Completed:</strong> {trace_data.get('completed_at', 'N/A')}</p>",
+        "</div>",
+        
+        # Stats Grid
+        "<div class='container'>",
+        "<h2>Summary Statistics</h2>",
+        "<div class='stats-grid'>",
+        f"<div class='stat-card'><h3>{summary.get('total_iterations', 0)}</h3><p>Total Iterations</p></div>",
+        f"<div class='stat-card'><h3>{summary.get('total_code_executions', 0)}</h3><p>Code Executions</p></div>",
+        f"<div class='stat-card' style='background: linear-gradient(135deg, #27ae60, #2ecc71);'>"
+        f"<h3>{summary.get('successful_code_executions', 0)}</h3><p>Successful</p></div>",
+        f"<div class='stat-card'><h3>{summary.get('total_hypotheses', 0)}</h3><p>Hypotheses</p></div>",
+        f"<div class='stat-card'><h3>{summary.get('total_experiments', 0)}</h3><p>Experiments</p></div>",
+        f"<div class='stat-card'><h3>{summary.get('total_findings', 0)}</h3><p>Findings</p></div>",
+        "</div>",
+        "</div>",
+    ]
+    
+    # Tabs Navigation
+    html_parts.extend([
+        "<div class='container'>",
+        "<div class='tabs'>",
+        "<button class='tab active' onclick='showTab(\"query\")'>Query & Brief</button>",
+        "<button class='tab' onclick='showTab(\"hypotheses\")'>Hypotheses</button>",
+        "<button class='tab' onclick='showTab(\"experiments\")'>Experiments</button>",
+        "<button class='tab' onclick='showTab(\"code\")'>Code Executions</button>",
+        "<button class='tab' onclick='showTab(\"decisions\")'>Supervisor Decisions</button>",
+        "<button class='tab' onclick='showTab(\"findings\")'>Findings</button>",
+        "</div>",
+    ])
+    
+    # Query Tab
+    html_parts.extend([
+        "<div id='query' class='tab-content active'>",
+        "<h2>Research Query</h2>",
+        f"<p>{html_lib.escape(trace_data.get('research_query', 'No query recorded'))}</p>",
+    ])
+    
+    if trace_data.get("research_brief"):
+        html_parts.extend([
+            "<h2>Research Brief</h2>",
+            f"<pre style='white-space: pre-wrap; background: #f5f5f5; padding: 15px; border-radius: 8px;'>"
+            f"{html_lib.escape(trace_data.get('research_brief', ''))}</pre>",
+        ])
+    html_parts.append("</div>")
+    
+    # Hypotheses Tab
+    html_parts.append("<div id='hypotheses' class='tab-content'>")
+    for h in trace_data.get("hypotheses", []):
+        status = h.get("status", "unknown")
+        status_class = "status-supported" if status == "supported" else "status-refuted" if status == "refuted" else ""
+        html_parts.extend([
+            "<div class='hypothesis-card'>",
+            f"<h3>{html_lib.escape(h.get('statement', 'Unknown')[:100])}</h3>",
+            f"<p class='{status_class}'><strong>Status:</strong> {status.upper()}</p>",
+            f"<p><strong>Rationale:</strong> {html_lib.escape(h.get('rationale', 'N/A'))}</p>",
+            "</div>",
+        ])
+    html_parts.append("</div>")
+    
+    # Experiments Tab
+    html_parts.append("<div id='experiments' class='tab-content'>")
+    for exp in trace_data.get("experiments", []):
+        html_parts.extend([
+            "<div class='experiment-card'>",
+            f"<h3>{html_lib.escape(exp.get('objective', 'Unknown')[:80])}</h3>",
+            f"<p><strong>ID:</strong> <code>{exp.get('id', 'N/A')}</code></p>",
+            f"<p><strong>Status:</strong> {exp.get('status', 'N/A')}</p>",
+            f"<p><strong>Supports Hypothesis:</strong> {exp.get('supports_hypothesis', 'N/A')}</p>",
+        ])
+        
+        if exp.get("code_executed"):
+            code_preview = exp.get("code_executed", "")[:2000]
+            html_parts.extend([
+                "<button class='collapsible'>View Code</button>",
+                "<div class='content'>",
+                f"<pre class='code-block'>{html_lib.escape(code_preview)}</pre>",
+                "</div>",
+            ])
+        
+        if exp.get("findings_summary"):
+            html_parts.append(f"<p><strong>Findings:</strong> {html_lib.escape(exp.get('findings_summary', '')[:500])}</p>")
+        
+        html_parts.append("</div>")
+    html_parts.append("</div>")
+    
+    # Code Executions Tab
+    html_parts.append("<div id='code' class='tab-content'>")
+    html_parts.append("<div class='timeline'>")
+    for i, ce in enumerate(trace_data.get("code_executions", [])):
+        success = ce.get("success", False)
+        event_class = "success" if success else "failure"
+        badge_class = "badge-success" if success else "badge-danger"
+        
+        html_parts.extend([
+            "<div class='timeline-item'>",
+            f"<div class='event {event_class}'>",
+            "<div class='event-header'>",
+            f"<span class='event-title'>Execution #{i+1} (Attempt #{ce.get('attempt_number', 1)})</span>",
+            f"<span class='badge {badge_class}'>{'SUCCESS' if success else 'FAILED'}</span>",
+            "</div>",
+            f"<p class='event-time'>{ce.get('timestamp', 'N/A')} | {ce.get('execution_time_seconds', 0):.2f}s</p>",
+            f"<p>{html_lib.escape(ce.get('purpose', 'N/A')[:200])}</p>",
+        ])
+        
+        if not success and ce.get("error_message"):
+            html_parts.extend([
+                "<p><strong>Error:</strong></p>",
+                f"<pre class='code-block' style='background: #c0392b;'>{html_lib.escape(ce.get('error_message', '')[:500])}</pre>",
+            ])
+        
+        code = ce.get("code", "")
+        code_lines = code.split("\n")
+        code_preview = "\n".join(code_lines[:30])
+        if len(code_lines) > 30:
+            code_preview += f"\n... ({len(code_lines)} total lines - see code_executions/ folder for full code)"
+        
+        html_parts.extend([
+            "<button class='collapsible'>View Code</button>",
+            "<div class='content'>",
+            f"<pre class='code-block'>{html_lib.escape(code_preview)}</pre>",
+            "</div>",
+            "</div>",
+            "</div>",
+        ])
+    html_parts.extend(["</div>", "</div>"])
+    
+    # Supervisor Decisions Tab
+    html_parts.append("<div id='decisions' class='tab-content'>")
+    for dec in trace_data.get("supervisor_decisions", []):
+        html_parts.extend([
+            "<div class='event'>",
+            "<div class='event-header'>",
+            f"<span class='event-title'>Iteration {dec.get('iteration', 'N/A')}: {dec.get('action_chosen', 'Unknown')}</span>",
+            f"<span class='event-time'>{dec.get('timestamp', 'N/A')}</span>",
+            "</div>",
+        ])
+        
+        state = dec.get("state_summary", {})
+        if isinstance(state, dict):
+            html_parts.append(
+                f"<p>State: {state.get('hypotheses_count', 0)} hypotheses, "
+                f"{state.get('experiments_count', 0)} experiments, "
+                f"{state.get('findings_count', 0)} findings</p>"
+            )
+        
+        if dec.get("reasoning"):
+            html_parts.append(f"<p><em>{html_lib.escape(dec.get('reasoning', '')[:300])}</em></p>")
+        
+        html_parts.append("</div>")
+    html_parts.append("</div>")
+    
+    # Findings Tab
+    html_parts.append("<div id='findings' class='tab-content'>")
+    for f in trace_data.get("findings", []):
+        novelty_badge = "<span class='badge badge-primary'>NOVEL</span> " if f.get("is_novel") else ""
+        html_parts.extend([
+            "<div class='finding-card'>",
+            f"<h3>{novelty_badge}{html_lib.escape(f.get('statement', 'Unknown')[:100])}</h3>",
+            f"<p><strong>Significance:</strong> {html_lib.escape(f.get('significance', 'N/A'))}</p>",
+            f"<p><strong>Supporting Experiments:</strong> {f.get('supporting_experiments', [])}</p>",
+            "</div>",
+        ])
+    html_parts.append("</div>")
+    
+    html_parts.append("</div>")  # Close container
+    
+    # JavaScript
+    html_parts.extend([
+        "<script>",
+        """
+        function showTab(tabId) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            
+            // Show selected tab
+            document.getElementById(tabId).classList.add('active');
+            event.target.classList.add('active');
+        }
+        
+        // Collapsible functionality
+        document.querySelectorAll('.collapsible').forEach(btn => {
+            btn.addEventListener('click', function() {
+                this.classList.toggle('active');
+                const content = this.nextElementSibling;
+                if (content.style.maxHeight) {
+                    content.style.maxHeight = null;
+                } else {
+                    content.style.maxHeight = content.scrollHeight + 'px';
+                }
+            });
+        });
+        """,
+        "</script>",
+        "</body>",
+        "</html>",
+    ])
+    
+    return "\n".join(html_parts)
+
+
 async def save_outputs(result: dict, output_dir: Path):
-    """Save all outputs to files."""
+    """Save all outputs to files in a timestamped subdirectory.
+    
+    This function saves:
+    1. Final report (report_{timestamp}.md)
+    2. All images/figures (output_{id}.{format})
+    3. Basic metadata (metadata_{timestamp}.json)
+    4. FULL TRACEABILITY DATA:
+       - trace_{timestamp}.json: Complete JSON trace for programmatic access
+       - trace_{timestamp}.md: Human-readable markdown trace
+       - trace_{timestamp}.html: Interactive HTML trace viewer
+       - code_executions/: Individual code execution files
+    """
     import base64
     
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Create a timestamped subdirectory for this run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"run_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"\n📁 Saving outputs to: {output_dir}")
+    print(f"\n📁 Saving outputs to: {run_dir}")
     
     # Save final report
     report = result.get("final_report", "")
     if report:
-        report_path = output_dir / f"report_{timestamp}.md"
+        report_path = run_dir / f"report_{timestamp}.md"
         with open(report_path, "w") as f:
             f.write(report)
         print(f"   📄 Report: {report_path}")
@@ -334,7 +1026,7 @@ async def save_outputs(result: dict, output_dir: Path):
             img_format = 'png'
         
         if img_base64:
-            img_path = output_dir / f"output_{output_id}.{img_format}"
+            img_path = run_dir / f"output_{output_id}.{img_format}"
             with open(img_path, "wb") as f:
                 f.write(base64.b64decode(img_base64))
             print(f"   🖼️  Figure: {img_path}")
@@ -343,13 +1035,20 @@ async def save_outputs(result: dict, output_dir: Path):
     if images_saved > 0:
         print(f"   📊 Total images saved: {images_saved}")
     
-    # Save metadata
+    # ==========================================================================
+    # TRACEABILITY: Save complete research trace
+    # ==========================================================================
+    await save_research_trace(result, run_dir, timestamp)
+    
+    # Save basic metadata (for backward compatibility)
     metadata = {
         "timestamp": timestamp,
+        "trace_id": result.get("trace_id", ""),
         "hypotheses_count": len(result.get("hypotheses", [])),
         "experiments_count": len(result.get("experiments", [])),
         "findings_count": len(result.get("findings", [])),
         "outputs_count": len(all_outputs),
+        "code_executions_count": len(result.get("code_execution_traces", [])),
     }
     
     # Add hypothesis details - handle both Pydantic objects and dicts
@@ -386,12 +1085,12 @@ async def save_outputs(result: dict, output_dir: Path):
                 })
         metadata["findings"] = findings_list
     
-    meta_path = output_dir / f"metadata_{timestamp}.json"
+    meta_path = run_dir / f"metadata_{timestamp}.json"
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"   📋 Metadata: {meta_path}")
     
-    print(f"\n✅ All outputs saved to {output_dir}")
+    print(f"\n✅ All outputs saved to {run_dir}")
 
 
 def check_environment():
