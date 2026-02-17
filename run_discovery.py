@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -272,6 +273,23 @@ async def run_discovery_with_monitoring(
     monitor = DiscoveryMonitor(verbose=verbose)
     monitor.start()
     
+    # Create the run output directory early so sources can be saved during discovery
+    run_dir = None
+    sources_dir = None
+    if output_dir:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = output_dir / f"run_{timestamp}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        sources_dir = run_dir / "sources"
+        sources_dir.mkdir(exist_ok=True)
+        print(f"\n📁 Output directory: {run_dir}")
+        print(f"   📚 Sources will be saved to: {sources_dir}")
+        
+        # Pass the sources directory through config so tools can persist files
+        if "configurable" not in config:
+            config["configurable"] = {}
+        config["configurable"]["sources_dir"] = str(sources_dir)
+    
     # Initial state
     initial_state = {
         "messages": [HumanMessage(content=query)]
@@ -309,9 +327,9 @@ async def run_discovery_with_monitoring(
     if final_result:
         monitor.finish(final_result)
         
-        # Save outputs
-        if output_dir:
-            await save_outputs(final_result, output_dir)
+        # Save outputs to the pre-created run directory
+        if run_dir:
+            await save_outputs(final_result, output_dir=None, run_dir=run_dir)
     
     return final_result
 
@@ -980,7 +998,7 @@ def generate_html_trace(trace_data: dict) -> str:
     return "\n".join(html_parts)
 
 
-async def save_outputs(result: dict, output_dir: Path):
+async def save_outputs(result: dict, output_dir: Path = None, run_dir: Path = None):
     """Save all outputs to files in a timestamped subdirectory.
     
     This function saves:
@@ -992,13 +1010,25 @@ async def save_outputs(result: dict, output_dir: Path):
        - trace_{timestamp}.md: Human-readable markdown trace
        - trace_{timestamp}.html: Interactive HTML trace viewer
        - code_executions/: Individual code execution files
+    5. sources/: Downloaded articles and documents used as research sources
+    
+    Args:
+        result: The discovery result dict
+        output_dir: Parent output directory (used to create run_dir if run_dir is None)
+        run_dir: Pre-created run directory (takes precedence over output_dir)
     """
     import base64
     
-    # Create a timestamped subdirectory for this run
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = output_dir / f"run_{timestamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # Use pre-created run_dir or create a new one
+    if run_dir is None:
+        if output_dir is None:
+            print("⚠️  No output directory specified, skipping save.")
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = output_dir / f"run_{timestamp}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = run_dir.name.replace("run_", "")
     
     print(f"\n📁 Saving outputs to: {run_dir}")
     
@@ -1085,10 +1115,28 @@ async def save_outputs(result: dict, output_dir: Path):
                 })
         metadata["findings"] = findings_list
     
+    # Include sources information in metadata
+    sources_dir = run_dir / "sources"
+    if sources_dir.exists():
+        source_files = list(sources_dir.iterdir())
+        metadata["sources_count"] = len(source_files)
+        metadata["sources"] = [f.name for f in source_files]
+    
     meta_path = run_dir / f"metadata_{timestamp}.json"
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"   📋 Metadata: {meta_path}")
+    
+    # Report on saved sources
+    if sources_dir.exists():
+        source_files = list(sources_dir.iterdir())
+        if source_files:
+            print(f"   📚 Sources: {len(source_files)} document(s) in {sources_dir}")
+            for sf in source_files:
+                size_kb = sf.stat().st_size / 1024
+                print(f"      - {sf.name} ({size_kb:.1f} KB)")
+        else:
+            print(f"   📚 Sources: (no documents downloaded)")
     
     print(f"\n✅ All outputs saved to {run_dir}")
 
@@ -1102,6 +1150,11 @@ def check_environment():
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     google_key = os.getenv("GOOGLE_API_KEY")
     vision_model = os.getenv("VISION_MODEL")
+    compat_key_pattern = re.compile(r"^OPENAI_COMPAT_[A-Z0-9_]+_API_KEY$")
+    has_openai_compat_alias_key = any(
+        compat_key_pattern.match(key) and bool(value)
+        for key, value in os.environ.items()
+    )
     
     if not e2b_key:
         print("   ❌ E2B_API_KEY not set")
@@ -1110,12 +1163,14 @@ def check_environment():
     else:
         print("   ✅ E2B_API_KEY is set")
     
-    if not openai_key and not anthropic_key:
-        print("   ❌ No LLM API key set (need OPENAI_API_KEY or ANTHROPIC_API_KEY)")
+    if not openai_key and not anthropic_key and not has_openai_compat_alias_key:
+        print("   ❌ No LLM API key set (need OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_COMPAT_<ALIAS>_API_KEY)")
         return False
     else:
         if openai_key:
             print("   ✅ OPENAI_API_KEY is set")
+        if has_openai_compat_alias_key:
+            print("   ✅ OPENAI_COMPAT_<ALIAS>_API_KEY is set")
         if anthropic_key:
             print("   ✅ ANTHROPIC_API_KEY is set")
     
@@ -1177,20 +1232,21 @@ Examples:
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Show verbose output (intermediate steps)"
+        default=True,
+        help="Show verbose output (intermediate steps, default: enabled)"
     )
     
     parser.add_argument(
         "--iterations", "-i",
         type=int,
-        default=8,
-        help="Maximum discovery iterations (default: 8)"
+        default=15,
+        help="Maximum discovery iterations (default: 15)"
     )
     
     parser.add_argument(
         "--quick", "-q",
         action="store_true",
-        help="Quick mode: fewer iterations (3), faster but less thorough"
+        help="Quick mode: fewer iterations (5), faster but less thorough"
     )
     
     parser.add_argument(
@@ -1246,27 +1302,44 @@ Examples:
     research_model = args.model or os.getenv("RESEARCH_MODEL", "openai:gpt-4o")
     final_report_model = args.final_model or os.getenv("FINAL_REPORT_MODEL", research_model)
     
+    # Read all model role assignments from environment
+    supervisor_model = os.getenv("SUPERVISOR_MODEL", "")
+    worker_model = os.getenv("WORKER_MODEL", "")
+    code_fixer_model = os.getenv("CODE_FIXER_MODEL", "")
+    max_code_fix_attempts = int(os.getenv("MAX_CODE_FIX_ATTEMPTS", "3"))
+    
     # Get recursion limit from environment (default: 100)
     recursion_limit = int(os.getenv("RECURSION_LIMIT", "100"))
     
     # Configure
-    iterations = 3 if args.quick else args.iterations
+    iterations = 5 if args.quick else args.iterations
     
     config = {
         "configurable": {
             "research_model": research_model,
             "final_report_model": final_report_model,
             "max_researcher_iterations": iterations,
+            "max_discovery_iterations": iterations,
             "allow_clarification": False,
             "scientific_domain": "astronomy",  # Can be made configurable
         },
         "recursion_limit": recursion_limit
     }
     
+    # Pass worker_model and supervisor_model through config if set
+    if worker_model:
+        config["configurable"]["worker_model"] = worker_model
+    if supervisor_model:
+        config["configurable"]["supervisor_model"] = supervisor_model
+    
     print(f"\n⚙️  Configuration:")
-    print(f"   Research model: {research_model}")
+    print(f"   Research model (global fallback): {research_model}")
+    print(f"   Supervisor model: {supervisor_model or '(using research_model)'}")
+    print(f"   Worker model:     {worker_model or '(using research_model)'}")
+    print(f"   Code fixer model: {code_fixer_model or '(using research_model)'}")
     print(f"   Final report model: {final_report_model}")
     print(f"   Max iterations: {iterations}")
+    print(f"   Max code fix attempts: {max_code_fix_attempts}")
     print(f"   Recursion limit: {recursion_limit}")
     print(f"   Verbose: {args.verbose}")
     print(f"   Output dir: {args.output if not args.no_save else '(not saving)'}")

@@ -30,6 +30,7 @@ Usage in Python/Jupyter:
 import asyncio
 import base64
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -199,7 +200,7 @@ class ProgressPrinter:
 
 async def discover(
     query: str,
-    iterations: int = 8,
+    iterations: int = 15,
     model: str = None,
     final_model: str = None,
     verbose: bool = False,
@@ -210,7 +211,7 @@ async def discover(
     
     Args:
         query: The research question or prompt
-        iterations: Maximum discovery iterations (default: 8)
+        iterations: Maximum discovery iterations (default: 15)
         model: LLM model to use (default: from .env RESEARCH_MODEL or openai:gpt-4o)
         final_model: Model for final report (default: from .env FINAL_REPORT_MODEL or same as model)
         verbose: Show detailed progress (default: False)
@@ -230,8 +231,15 @@ async def discover(
     # Check environment
     if not os.getenv("E2B_API_KEY"):
         raise EnvironmentError("E2B_API_KEY not set. Get from https://e2b.dev/dashboard")
-    if not os.getenv("OPENAI_API_KEY") and not os.getenv("ANTHROPIC_API_KEY"):
-        raise EnvironmentError("No LLM API key set (OPENAI_API_KEY or ANTHROPIC_API_KEY)")
+    compat_key_pattern = re.compile(r"^OPENAI_COMPAT_[A-Z0-9_]+_API_KEY$")
+    has_openai_compat_alias_key = any(
+        compat_key_pattern.match(key) and bool(value)
+        for key, value in os.environ.items()
+    )
+    if not os.getenv("OPENAI_API_KEY") and not os.getenv("ANTHROPIC_API_KEY") and not has_openai_compat_alias_key:
+        raise EnvironmentError(
+            "No LLM API key set (OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_COMPAT_<ALIAS>_API_KEY)"
+        )
     
     # Get models from .env if not provided
     research_model = model or os.getenv("RESEARCH_MODEL", "openai:gpt-4o")
@@ -243,9 +251,15 @@ async def discover(
             "research_model": research_model,
             "final_report_model": final_report_model,
             "max_researcher_iterations": iterations,
+            "max_discovery_iterations": iterations,
             "allow_clarification": False,
         }
     }
+    
+    # Create a sources directory for persisting downloaded articles
+    sources_dir = Path("outputs") / "interactive_sources"
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    config["configurable"]["sources_dir"] = str(sources_dir)
     
     # Initial state
     initial_state = {
@@ -313,7 +327,7 @@ async def quick_discover(query: str, **kwargs) -> DiscoveryResult:
     Example:
         result = await quick_discover("Calculate mean of [1,2,3,4,5]")
     """
-    kwargs.setdefault("iterations", 3)
+    kwargs.setdefault("iterations", 5)
     return await discover(query, **kwargs)
 
 

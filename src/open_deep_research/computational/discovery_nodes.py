@@ -92,7 +92,7 @@ from open_deep_research.computational.configuration import (
     get_domain_prompt_context,
 )
 from open_deep_research.utils import (
-    get_api_key_for_model,
+    get_model_runtime_config,
     get_today_str,
     think_tool,
 )
@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize configurable model
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key"),
+    configurable_fields=("model", "max_tokens", "api_key", "base_url"),
 )
 
 
@@ -113,24 +113,24 @@ def get_supervisor_model_config(configurable: ComputationalConfiguration, config
     """Get supervisor model configuration with fallback to research model."""
     model_name = configurable.supervisor_model or configurable.research_model
     max_tokens = configurable.supervisor_model_max_tokens or configurable.research_model_max_tokens
-    return {
-        "model": model_name,
-        "max_tokens": max_tokens,
-        "api_key": get_api_key_for_model(model_name, config),
-        "tags": ["langsmith:nostream"]
-    }
+    return get_model_runtime_config(
+        model_name,
+        config,
+        max_tokens=max_tokens,
+        tags=["langsmith:nostream"],
+    )
 
 
 def get_worker_model_config(configurable: ComputationalConfiguration, config: RunnableConfig) -> Dict[str, Any]:
     """Get worker model configuration with fallback to research model."""
     model_name = configurable.worker_model or configurable.research_model
     max_tokens = configurable.worker_model_max_tokens or configurable.research_model_max_tokens
-    return {
-        "model": model_name,
-        "max_tokens": max_tokens,
-        "api_key": get_api_key_for_model(model_name, config),
-        "tags": ["langsmith:nostream"]
-    }
+    return get_model_runtime_config(
+        model_name,
+        config,
+        max_tokens=max_tokens,
+        tags=["langsmith:nostream"],
+    )
 
 
 def escape_format_braces(text: str) -> str:
@@ -143,6 +143,41 @@ def escape_format_braces(text: str) -> str:
     if not text:
         return text
     return text.replace("{", "{{").replace("}", "}}")
+
+
+# Default timeout for model invocations (seconds)
+MODEL_INVOKE_TIMEOUT = int(os.getenv("MODEL_INVOKE_TIMEOUT", "180"))
+
+
+async def invoke_model_with_timeout(model, messages, timeout: int = None, label: str = "model"):
+    """Invoke a model with a timeout to prevent indefinite hangs.
+    
+    Args:
+        model: The LangChain model to invoke
+        messages: Messages to send
+        timeout: Timeout in seconds (defaults to MODEL_INVOKE_TIMEOUT)
+        label: Human-readable label for logging
+    
+    Returns:
+        The model response
+    
+    Raises:
+        asyncio.TimeoutError: If the model doesn't respond in time
+    """
+    timeout = timeout or MODEL_INVOKE_TIMEOUT
+    try:
+        return await asyncio.wait_for(
+            model.ainvoke(messages),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"Model invocation timed out after {timeout}s for: {label}")
+        raise TimeoutError(
+            f"Model '{label}' did not respond within {timeout} seconds. "
+            f"This may indicate the model is too slow for this role. "
+            f"Consider using a faster model (e.g., deepseek-chat instead of deepseek-reasoner) "
+            f"or increasing MODEL_INVOKE_TIMEOUT."
+        )
 
 
 def summarize_papers(papers: List[Any]) -> str:
@@ -270,14 +305,27 @@ def build_progress_summary(state: ComputationalDiscoveryState) -> str:
     if knowledge_summary:
         parts.append(f"**Knowledge Gathered:**\n{knowledge_summary[:1500]}")
     
-    # Data explorations
+    # Data explorations / discovery results
     data_explorations = state.get("data_explorations", [])
     if data_explorations:
         successful = [e for e in data_explorations if e.get("success")]
         failed = [e for e in data_explorations if not e.get("success")]
-        parts.append(f"**Data Explorations:** {len(successful)} successful, {len(failed)} failed")
+        parts.append(f"**Data Discovery Results:** {len(successful)} successful, {len(failed)} failed")
         for exp in successful[:3]:
-            parts.append(f"  - {exp.get('data_source', '?')}: {exp.get('goal', '')[:100]}")
+            parts.append(f"  - [{exp.get('data_source', '?')}] {exp.get('goal', '')[:100]}")
+            # Include key findings preview so supervisor knows what data is available
+            stdout_preview = exp.get("stdout_preview", "")
+            if stdout_preview:
+                # Extract lines mentioning FOUND or AVAILABLE
+                found_lines = [
+                    line.strip() for line in stdout_preview.split("\n")
+                    if any(kw in line.upper() for kw in ["FOUND", "AVAILABLE", "CATALOG", "SPECTRA"])
+                ]
+                if found_lines:
+                    for line in found_lines[:3]:
+                        parts.append(f"    → {line[:120]}")
+    else:
+        parts.append("**Data Discovery:** Not yet performed. Use ExploreData to search for available data!")
     
     # Hypotheses
     hypotheses = state.get("hypotheses", [])
@@ -461,7 +509,10 @@ async def clarify_discovery_query(
             .with_config(model_config)
         )
         
-        response = await clarification_model.ainvoke([HumanMessage(content=prompt)])
+        response = await invoke_model_with_timeout(
+            clarification_model, [HumanMessage(content=prompt)],
+            timeout=MODEL_INVOKE_TIMEOUT, label="clarify_discovery_query"
+        )
         
         if response.need_clarification:
             return Command(
@@ -518,7 +569,10 @@ async def generate_research_brief(
         domain_context=domain_context
     )
     
-    response = await research_model.ainvoke([HumanMessage(content=prompt)])
+    response = await invoke_model_with_timeout(
+        research_model, [HumanMessage(content=prompt)],
+        timeout=MODEL_INVOKE_TIMEOUT, label="generate_research_brief"
+    )
     research_brief = response.content
     
     # Record the research brief generation
@@ -666,6 +720,12 @@ async def discovery_supervisor(
         domain_enum = ScientificDomain.GENERAL
     
     domain_context = get_domain_prompt_context(domain_enum)
+    
+    # Inject data discovery guidance for astronomy domain
+    if domain_str.lower() in ["astronomy", "astro", "exoplanet", "stellar", "general"]:
+        from open_deep_research.computational.context import get_data_discovery_guidance
+        domain_context += "\n" + get_data_discovery_guidance()
+    
     progress_summary = build_progress_summary(state)
     
     # Build fresh system prompt with current state
@@ -688,11 +748,41 @@ async def discovery_supervisor(
     MAX_RECENT_MESSAGES = 6
     recent_messages = supervisor_messages[-MAX_RECENT_MESSAGES:] if len(supervisor_messages) > MAX_RECENT_MESSAGES else supervisor_messages
     
+    # =========================================================================
+    # SANITIZE MESSAGE HISTORY: Ensure valid tool_calls / ToolMessage pairing
+    # =========================================================================
+    # Some APIs (DeepSeek, etc.) require that every ToolMessage is preceded by
+    # an AIMessage with tool_calls. When we truncate the history, we can break
+    # this pairing. Fix by:
+    # 1. Finding the first valid start position (not a ToolMessage without parent)
+    # 2. Removing orphaned ToolMessages
+    sanitized = []
+    has_pending_tool_calls = False
+    for msg in recent_messages:
+        if isinstance(msg, ToolMessage):
+            if has_pending_tool_calls:
+                sanitized.append(msg)
+            else:
+                # Orphaned ToolMessage -- skip it
+                logger.debug("Skipping orphaned ToolMessage in supervisor history")
+                continue
+        elif isinstance(msg, AIMessage) and getattr(msg, 'tool_calls', None):
+            sanitized.append(msg)
+            has_pending_tool_calls = True
+        else:
+            sanitized.append(msg)
+            has_pending_tool_calls = False
+    
+    recent_messages = sanitized
+    
     # Build the message list: fresh system prompt + recent conversation
     messages_for_model = [SystemMessage(content=system_prompt)] + recent_messages
     
-    # Invoke supervisor
-    response = await supervisor_model.ainvoke(messages_for_model)
+    # Invoke supervisor with timeout protection
+    response = await invoke_model_with_timeout(
+        supervisor_model, messages_for_model,
+        timeout=MODEL_INVOKE_TIMEOUT, label="discovery_supervisor"
+    )
     
     return Command(
         goto="supervisor_tools",
@@ -977,8 +1067,11 @@ async def gather_knowledge(
     new_data_sources = []
     max_iterations = 5
     
-    for _ in range(max_iterations):
-        response = await knowledge_model.ainvoke(messages)
+    for iter_num in range(max_iterations):
+        response = await invoke_model_with_timeout(
+            knowledge_model, messages,
+            timeout=MODEL_INVOKE_TIMEOUT, label=f"gather_knowledge_iter_{iter_num}"
+        )
         messages.append(response)
         
         if not response.tool_calls:
@@ -1081,15 +1174,18 @@ async def explore_data(
     state: ComputationalDiscoveryState,
     config: RunnableConfig
 ) -> Command[Literal["discovery_supervisor"]]:
-    """Explore database schemas and APIs before running experiments.
+    """Explore database schemas and APIs, and DISCOVER available data sources.
     
-    This node runs exploratory code to discover:
-    - Available column names in databases
-    - Data types and value ranges
-    - API-specific syntax requirements
-    - Sample data to understand the structure
+    This node is the core of the data discovery self-reflection system.
+    It runs exploratory code to:
+    - Search VizieR for relevant catalogs (millions of catalogs available!)
+    - Discover database schemas and column names
+    - Find MAST observations for specific targets
+    - List available astroquery modules and specialized databases
+    - Test data availability before the main experiment
     
-    The findings are passed back to the supervisor to inform experiment design.
+    The findings are passed back to the supervisor to inform experiment design
+    and prevent unnecessary simulation when real data is available.
     """
     from open_deep_research.computational.prompts import data_exploration_prompt
     
@@ -1114,13 +1210,32 @@ async def explore_data(
     # Use CODE_FIXER_MODEL for generating exploration code (it's better at coding)
     code_fixer_model = os.getenv("CODE_FIXER_MODEL", configurable.research_model)
     
-    # Build exploration prompt
+    # Build rich context including previous explorations and research brief
+    previous_explorations_text = ""
+    data_explorations = state.get("data_explorations", [])
+    if data_explorations:
+        previous_explorations_text = "\nPrevious exploration results:\n"
+        for exp in data_explorations[-3:]:
+            status = "SUCCESS" if exp.get("success") else "FAILED"
+            previous_explorations_text += f"  - [{status}] {exp.get('data_source', '')}: {exp.get('goal', '')[:100]}\n"
+            if exp.get("success") and exp.get("findings"):
+                # Include key findings from previous explorations
+                findings_preview = exp["findings"][:500]
+                previous_explorations_text += f"    Key output: {findings_preview}\n"
+    
     context = f"""
 Research Brief: {state.get('research_brief', 'Not available')}
 
-Previous exploration attempts: {len(state.get('data_explorations', []))}
+Scientific Domain: {state.get('scientific_domain', 'general')}
+
+Previous exploration attempts: {len(data_explorations)}
+{previous_explorations_text}
 
 Data source to explore: {data_source}
+
+IMPORTANT: Your goal is to DISCOVER data that might be useful for the research.
+Search broadly across databases, especially VizieR (which hosts millions of catalogs).
+Don't just check one source - cast a wide net to find all relevant data.
 """
     
     exploration_prompt = data_exploration_prompt.format(
@@ -1128,35 +1243,35 @@ Data source to explore: {data_source}
         context=context
     )
     
-    # Get API key for code fixer model
-    code_fixer_api_key = get_api_key_for_model(code_fixer_model, config)
-    
     # Generate exploration code using the better coding model
-    exploration_model = configurable_model.with_config({
-        "model": code_fixer_model,
-        "max_tokens": 4096,
-        "api_key": code_fixer_api_key,
-        "tags": ["langsmith:nostream"]
-    })
+    exploration_model = configurable_model.with_config(
+        get_model_runtime_config(
+            code_fixer_model,
+            config,
+            max_tokens=6000,
+            tags=["langsmith:nostream"],
+        )
+    )
     
     try:
-        response = await exploration_model.ainvoke([
-            HumanMessage(content=exploration_prompt)
-        ])
+        response = await invoke_model_with_timeout(
+            exploration_model,
+            [HumanMessage(content=exploration_prompt)],
+            timeout=MODEL_INVOKE_TIMEOUT,
+            label="explore_data_code_gen"
+        )
         
         # Extract code from response
         code_content = response.content
         
         # Try to extract code from markdown blocks
         if "```python" in code_content:
-            import re
             code_blocks = re.findall(r'```python\s*(.*?)```', code_content, re.DOTALL)
             if code_blocks:
                 exploration_code = max(code_blocks, key=len).strip()
             else:
                 exploration_code = code_content
         elif "```" in code_content:
-            import re
             code_blocks = re.findall(r'```\s*(.*?)```', code_content, re.DOTALL)
             if code_blocks:
                 exploration_code = max(code_blocks, key=len).strip()
@@ -1178,41 +1293,50 @@ Data source to explore: {data_source}
             }
         )
     
-    # Execute exploration code in E2B
+    # Execute exploration code in E2B with generous timeout for network queries
     from open_deep_research.computational.code_interpreter import execute_code
     
     exploration_result = await execute_code(
         code=exploration_code,
-        purpose=f"Explore {data_source}: {exploration_goal}",
-        timeout=120,  # 2 minutes should be enough for exploration
+        purpose=f"Data Discovery - {data_source}: {exploration_goal}",
+        timeout=180,  # 3 minutes for broad discovery (VizieR searches can take time)
         config=config
     )
     
-    # Format the exploration findings
+    # Format the exploration findings with rich discovery-oriented summary
     if exploration_result.success:
+        stdout_content = exploration_result.stdout[:10000] if exploration_result.stdout else "No output"
+        
+        # Detect if catalogs/data were actually found
+        data_indicators = [
+            "FOUND:", "AVAILABLE", "data_found", "catalogs found",
+            "spectra found", "observations found", "columns"
+        ]
+        has_data = any(ind.lower() in stdout_content.lower() for ind in data_indicators)
+        
         findings = f"""
-## Data Exploration Successful!
+## Data Discovery {'Successful - Data Found!' if has_data else 'Complete'}
 
 **Data Source:** {data_source}
 **Goal:** {exploration_goal}
 
-### Exploration Output:
+### Discovery Output:
 ```
-{exploration_result.stdout[:8000] if exploration_result.stdout else "No output"}
+{stdout_content}
 ```
 
-### Key Findings:
-The exploration code ran successfully. The output above shows:
-- Available column names
-- Sample data values
-- Correct query syntax
+### Discovery Assessment:
+{"REAL DATA was found! Use the catalogs and data sources identified above in your experiments." if has_data else "No directly matching data was found in this search. Consider: (1) broader VizieR keywords, (2) different database sources, (3) theoretical calculations with known physics as a fallback."}
 
-**Use these findings when designing your experiment!**
+**IMPORTANT: If catalogs were discovered above, USE THEM in your next experiment instead of simulating data!**
 """
-        logger.info("Data exploration successful")
+        logger.info(f"Data exploration successful (data found: {has_data})")
     else:
+        # Even failed explorations often contain useful partial output
+        partial_stdout = exploration_result.stdout[:5000] if exploration_result.stdout else "No output"
+        
         findings = f"""
-## Data Exploration Failed
+## Data Exploration Encountered Errors
 
 **Data Source:** {data_source}
 **Goal:** {exploration_goal}
@@ -1222,9 +1346,9 @@ The exploration code ran successfully. The output above shows:
 {exploration_result.error_message or "Unknown error"}
 ```
 
-### Standard Output (partial):
+### Partial Output (may still contain useful information):
 ```
-{exploration_result.stdout[:3000] if exploration_result.stdout else "No output"}
+{partial_stdout}
 ```
 
 ### Standard Error:
@@ -1232,26 +1356,22 @@ The exploration code ran successfully. The output above shows:
 {exploration_result.stderr[:2000] if exploration_result.stderr else "No errors"}
 ```
 
-### Next Steps:
-The exploration failed, but the error message may reveal useful information about:
-- Correct column names (if "invalid identifier" error)
-- Required packages (if import error)
-- API syntax requirements
-
-You can:
-1. Try ExploreData again with a different approach
-2. Proceed with RunExperiment - the code fixer will use this error info to fix queries
+### Recovery Suggestions:
+1. Try ExploreData again with different keywords or a different data source
+2. Try a simpler exploration (e.g., just search VizieR for one keyword)
+3. If network issues, the data may still exist - try again
+4. As last resort, proceed with RunExperiment using theoretical calculations (NOT simulated data)
 """
-        logger.warning(f"Data exploration failed: {exploration_result.error_message}")
+        logger.warning(f"Data exploration had errors: {exploration_result.error_message}")
     
     # Store exploration results
-    data_explorations = state.get("data_explorations", [])
     data_explorations.append({
         "data_source": data_source,
         "goal": exploration_goal,
         "success": exploration_result.success,
         "findings": findings,
-        "code": exploration_code[:2000]  # Store partial code for reference
+        "code": exploration_code[:3000],  # Store more code for reference
+        "stdout_preview": (exploration_result.stdout or "")[:2000],
     })
     
     return Command(
@@ -1341,9 +1461,12 @@ async def run_experiment(
             .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
             .with_config(model_config)
         )
-        experiment_plan = await experiment_model.ainvoke([
-            HumanMessage(content=design_prompt)
-        ])
+        experiment_plan = await invoke_model_with_timeout(
+            experiment_model,
+            [HumanMessage(content=design_prompt)],
+            timeout=MODEL_INVOKE_TIMEOUT,
+            label="experiment_design"
+        )
     except Exception as e:
         error_str = str(e).lower()
         # Check if it's a structured output compatibility issue
@@ -1383,9 +1506,12 @@ Remember: The code between ---BEGIN_PYTHON_CODE--- and ---END_PYTHON_CODE--- mus
 pure Python with NO markdown, NO explanations, and MUST be syntactically complete.
 """
             try:
-                fallback_response = await configurable_model.with_config(model_config).ainvoke([
-                    HumanMessage(content=fallback_prompt)
-                ])
+                fallback_response = await invoke_model_with_timeout(
+                    configurable_model.with_config(model_config),
+                    [HumanMessage(content=fallback_prompt)],
+                    timeout=MODEL_INVOKE_TIMEOUT,
+                    label="experiment_design_fallback"
+                )
                 # Parse the response manually
                 content = fallback_response.content
                 
@@ -1533,6 +1659,45 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
             }
         )
     
+    # ==========================================================================
+    # SIMULATION DETECTION: Check if code is generating synthetic data
+    # ==========================================================================
+    from open_deep_research.computational.context.astroquery_discovery import (
+        check_code_for_simulation_patterns,
+    )
+    
+    sim_check = check_code_for_simulation_patterns(experiment_plan.python_code)
+    
+    if sim_check["has_simulation"] and not sim_check["is_legitimate"]:
+        # Code appears to be simulating data -- check if we already explored for real data
+        data_explorations = state.get("data_explorations", [])
+        successful_explorations = [e for e in data_explorations if e.get("success")]
+        
+        if not successful_explorations:
+            # No successful data explorations yet -- warn the supervisor
+            logger.warning(
+                f"Simulation detected in experiment code without prior data discovery. "
+                f"Patterns: {sim_check['simulation_patterns']}"
+            )
+            print(f"\n{'='*70}")
+            print("SIMULATION DETECTION WARNING")
+            print(f"{'='*70}")
+            print(f"Detected simulation patterns: {sim_check['simulation_patterns']}")
+            print(f"Recommendation: {sim_check['recommendation']}")
+            print(f"{'='*70}\n")
+            
+            # Add warning to experiment description for the code fixer to see
+            experiment_description += (
+                f"\n\n⚠️ SIMULATION WARNING: The generated code appears to use synthetic data "
+                f"(patterns: {', '.join(sim_check['simulation_patterns'][:3])}). "
+                f"If possible, replace simulated data with real data from astroquery databases. "
+                f"Search VizieR catalogs for relevant data before simulating."
+            )
+        else:
+            logger.info(
+                "Simulation detected but data explorations were done -- may be intentional."
+            )
+    
     # Create experiment record
     experiment = ExperimentRecord(
         hypothesis_id=hypothesis.id,
@@ -1582,10 +1747,24 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
     computation_result = None
     code_execution_traces = []  # Track all execution attempts
     
+    # Per-experiment wall-clock timeout (prevents single experiments from running forever)
+    experiment_wall_timeout = int(os.getenv("EXPERIMENT_WALL_TIMEOUT", "600"))  # 10 min default
+    experiment_start_wall = datetime.now()
+    
     # Priority 7: Use persistent sandbox if configured
     sandbox_id = state.get("sandbox_id") if configurable.use_persistent_sandbox else None
     
     for attempt in range(max_fix_attempts + 1):
+        # Check wall-clock timeout
+        elapsed_wall = (datetime.now() - experiment_start_wall).total_seconds()
+        if elapsed_wall > experiment_wall_timeout:
+            logger.warning(
+                f"Experiment wall-clock timeout reached ({elapsed_wall:.0f}s > {experiment_wall_timeout}s). "
+                f"Stopping after {attempt} attempts."
+            )
+            print(f"\n⏰ EXPERIMENT TIMEOUT: {elapsed_wall:.0f}s elapsed (limit: {experiment_wall_timeout}s)")
+            break
+        
         execution_start_time = datetime.now()
         
         # Execute the experiment in E2B with persistent sandbox
@@ -1708,21 +1887,26 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
                     print(f"Using CODE_FIXER_MODEL: {code_fixer_model_name}")
                     logger.info(f"Using dedicated code fixer model: {code_fixer_model_name}")
                     
-                    fixer_api_key = get_api_key_for_model(code_fixer_model_name, config)
-                    fixer_config = {
-                        "model": code_fixer_model_name,
-                        "max_tokens": 16000,  # Allow long code
-                        "api_key": fixer_api_key,
-                        "tags": ["langsmith:nostream"]
-                    }
-                    fix_response = await configurable_model.with_config(fixer_config).ainvoke([
-                        HumanMessage(content=fix_prompt)
-                    ])
+                    fixer_config = get_model_runtime_config(
+                        code_fixer_model_name,
+                        config,
+                        max_tokens=16000,  # Allow long code
+                        tags=["langsmith:nostream"],
+                    )
+                    fix_response = await invoke_model_with_timeout(
+                        configurable_model.with_config(fixer_config),
+                        [HumanMessage(content=fix_prompt)],
+                        timeout=MODEL_INVOKE_TIMEOUT,
+                        label=f"code_fix_attempt_{attempt+2}"
+                    )
                 else:
                     # Use the same model as research
-                    fix_response = await configurable_model.with_config(model_config).ainvoke([
-                        HumanMessage(content=fix_prompt)
-                    ])
+                    fix_response = await invoke_model_with_timeout(
+                        configurable_model.with_config(model_config),
+                        [HumanMessage(content=fix_prompt)],
+                        timeout=MODEL_INVOKE_TIMEOUT,
+                        label=f"code_fix_attempt_{attempt+2}"
+                    )
                 
                 # Extract the fixed code from the response
                 fixed_code = fix_response.content
@@ -2025,6 +2209,30 @@ async def analyze_results(
         if quality.get('warnings'):
             quality_context += "- Warnings: " + "; ".join(quality['warnings']) + "\n"
     
+    # ==========================================================================
+    # SIMULATION DETECTION in results: flag if experiment used synthetic data
+    # ==========================================================================
+    simulation_warning = ""
+    if experiment.code_executed:
+        from open_deep_research.computational.context.astroquery_discovery import (
+            check_code_for_simulation_patterns,
+        )
+        sim_check = check_code_for_simulation_patterns(experiment.code_executed)
+        if sim_check["has_simulation"] and not sim_check["is_legitimate"]:
+            simulation_warning = f"""
+
+## ⚠️ SIMULATION DATA WARNING
+The experiment code contains patterns suggesting SYNTHETIC/SIMULATED data was used:
+- Patterns detected: {', '.join(sim_check['simulation_patterns'][:5])}
+
+**This is a CRITICAL limitation.** Results based on simulated data cannot support real scientific conclusions.
+
+**RECOMMENDATION for next steps:**
+1. Use ExploreData to search VizieR catalogs for real data (e.g., atmospheric retrievals, spectral surveys)
+2. Search MAST for JWST/HST spectroscopic observations of the target planets
+3. Only after confirming real data doesn't exist, use theoretical calculations (NOT random data)
+"""
+    
     # Build analysis prompt with research context and previous findings
     previous_findings_text = summarize_findings(state.get("findings", []))
     
@@ -2035,7 +2243,7 @@ async def analyze_results(
         hypothesis=hypothesis.statement,
         experiment_design=f"Objective: {experiment.design.objective}\nMethodology: {experiment.design.methodology}",
         computation_results=computation_results[0].to_ai_summary() if computation_results else "No results",
-        outputs_summary=outputs_summary + quality_context
+        outputs_summary=outputs_summary + quality_context + simulation_warning
     )
     
     # Try structured output, fall back to manual parsing
@@ -2047,12 +2255,15 @@ async def analyze_results(
             .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
             .with_config(model_config)
         )
-        analysis = await analysis_model.ainvoke([
-            HumanMessage(content=analysis_prompt)
-        ])
+        analysis = await invoke_model_with_timeout(
+            analysis_model,
+            [HumanMessage(content=analysis_prompt)],
+            timeout=MODEL_INVOKE_TIMEOUT,
+            label="analyze_results"
+        )
     except Exception as e:
         error_str = str(e).lower()
-        if "response_format" in error_str or "unavailable" in error_str or "json" in error_str:
+        if "response_format" in error_str or "unavailable" in error_str or "json" in error_str or "timeout" in error_str:
             logger.warning(f"Structured output not supported for analysis, using fallback: {e}")
             
             # Fallback: ask for structured text response
@@ -2080,9 +2291,12 @@ SHOULD_REFINE_HYPOTHESIS: [YES or NO]
 REFINED_HYPOTHESIS: [If yes above, provide refined hypothesis. If no, write "N/A"]
 """
             try:
-                fallback_response = await configurable_model.with_config(model_config).ainvoke([
-                    HumanMessage(content=fallback_prompt)
-                ])
+                fallback_response = await invoke_model_with_timeout(
+                    configurable_model.with_config(model_config),
+                    [HumanMessage(content=fallback_prompt)],
+                    timeout=MODEL_INVOKE_TIMEOUT,
+                    label="analyze_results_fallback"
+                )
                 content = fallback_response.content
                 
                 # Parse findings summary
@@ -2427,12 +2641,14 @@ Use RunExperiment NOW to execute code for your hypothesis.
     raw_notes = "\n\n".join(raw_notes_parts)
     
     # Generate final report
-    report_model = configurable_model.with_config({
-        "model": configurable.final_report_model,
-        "max_tokens": configurable.final_report_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.final_report_model, config),
-        "tags": ["langsmith:nostream"]
-    })
+    report_model = configurable_model.with_config(
+        get_model_runtime_config(
+            configurable.final_report_model,
+            config,
+            max_tokens=configurable.final_report_model_max_tokens,
+            tags=["langsmith:nostream"],
+        )
+    )
     
     synthesis_prompt = final_report_synthesis_prompt.format(
         date=get_today_str(),

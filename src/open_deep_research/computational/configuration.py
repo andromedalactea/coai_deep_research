@@ -103,13 +103,13 @@ class ComputationalConfiguration(BaseConfiguration):
     # ==========================================================================
     
     max_discovery_iterations: int = Field(
-        default=5,
+        default=15,
         metadata={
             "x_oap_ui_config": {
                 "type": "slider",
-                "default": 5,
-                "min": 1,
-                "max": 10,
+                "default": 15,
+                "min": 3,
+                "max": 30,
                 "step": 1,
                 "description": "Maximum number of hypothesis-experiment-analyze cycles"
             }
@@ -390,10 +390,16 @@ def get_domain_prompt_context(domain: ScientificDomain) -> str:
 Available real data sources via **astroquery**:
 - **NASA Exoplanet Archive**: Confirmed exoplanets (mass, radius, orbital parameters, stellar properties)
 - **SIMBAD**: Stellar classifications, coordinates, proper motions
-- **VizieR/Gaia DR3**: Precise stellar positions, parallaxes, photometry
-- **MAST**: HST, JWST, Kepler, TESS observations and light curves
+- **VizieR**: MILLIONS of catalogs — Gaia DR3, atmospheric retrievals, spectral surveys, chemical abundances, and much more. Use `Vizier.find_catalogs("your topic")` to discover!
+- **MAST**: HST, JWST, Kepler, TESS observations and data products
 - **SDSS**: Galaxy surveys, spectroscopic data
 - **Lightkurve**: Time-series photometry from Kepler/TESS
+- **HITRAN/Splatalogue**: Molecular spectral line databases
+- **IRSA**: NASA/IPAC Infrared Science Archive
+- **And many more**: Use ExploreData to discover all available astroquery modules!
+
+**IMPORTANT**: Before simulating data, ALWAYS search VizieR and MAST for existing observations.
+VizieR alone hosts millions of catalogs including published atmospheric retrievals and spectral surveys.
 
 Install astroquery in the sandbox: `pip install astroquery astropy lightkurve`
 

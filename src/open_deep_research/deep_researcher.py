@@ -42,7 +42,7 @@ from open_deep_research.state import (
 from open_deep_research.utils import (
     anthropic_websearch_called,
     get_all_tools,
-    get_api_key_for_model,
+    get_model_runtime_config,
     get_model_token_limit,
     get_notes_from_tool_calls,
     get_today_str,
@@ -54,7 +54,7 @@ from open_deep_research.utils import (
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key"),
+    configurable_fields=("model", "max_tokens", "api_key", "base_url"),
 )
 
 
@@ -62,24 +62,24 @@ def get_supervisor_model_config(configurable: Configuration, config: RunnableCon
     """Resolve model config for supervisor/planning nodes with fallback."""
     model_name = configurable.supervisor_model or configurable.research_model
     max_tokens = configurable.supervisor_model_max_tokens or configurable.research_model_max_tokens
-    return {
-        "model": model_name,
-        "max_tokens": max_tokens,
-        "api_key": get_api_key_for_model(model_name, config),
-        "tags": ["langsmith:nostream"],
-    }
+    return get_model_runtime_config(
+        model_name,
+        config,
+        max_tokens=max_tokens,
+        tags=["langsmith:nostream"],
+    )
 
 
 def get_worker_model_config(configurable: Configuration, config: RunnableConfig) -> dict:
     """Resolve model config for worker/researcher nodes with fallback."""
     model_name = configurable.worker_model or configurable.research_model
     max_tokens = configurable.worker_model_max_tokens or configurable.research_model_max_tokens
-    return {
-        "model": model_name,
-        "max_tokens": max_tokens,
-        "api_key": get_api_key_for_model(model_name, config),
-        "tags": ["langsmith:nostream"],
-    }
+    return get_model_runtime_config(
+        model_name,
+        config,
+        max_tokens=max_tokens,
+        tags=["langsmith:nostream"],
+    )
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     """Analyze user messages and ask clarifying questions if the research scope is unclear.
@@ -528,12 +528,14 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
     """
     # Step 1: Configure the compression model
     configurable = Configuration.from_runnable_config(config)
-    synthesizer_model = configurable_model.with_config({
-        "model": configurable.compression_model,
-        "max_tokens": configurable.compression_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.compression_model, config),
-        "tags": ["langsmith:nostream"]
-    })
+    synthesizer_model = configurable_model.with_config(
+        get_model_runtime_config(
+            configurable.compression_model,
+            config,
+            max_tokens=configurable.compression_model_max_tokens,
+            tags=["langsmith:nostream"],
+        )
+    )
     
     # Step 2: Prepare messages for compression
     researcher_messages = state.get("researcher_messages", [])
@@ -628,12 +630,12 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     
     # Step 2: Configure the final report generation model
     configurable = Configuration.from_runnable_config(config)
-    writer_model_config = {
-        "model": configurable.final_report_model,
-        "max_tokens": configurable.final_report_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.final_report_model, config),
-        "tags": ["langsmith:nostream"]
-    }
+    writer_model_config = get_model_runtime_config(
+        configurable.final_report_model,
+        config,
+        max_tokens=configurable.final_report_model_max_tokens,
+        tags=["langsmith:nostream"],
+    )
     
     # Step 3: Attempt report generation with token limit retry logic
     max_retries = 3

@@ -16,6 +16,29 @@ DeepSeek models offer exceptional performance at a fraction of the cost of GPT-4
 
 ## Setup Instructions
 
+## Multi-Provider OpenAI-Compatible Routing (Recommended)
+
+You can now use multiple OpenAI-compatible providers in one run.
+
+Model syntax:
+- `openai:model-name` -> default OpenAI credentials (`OPENAI_API_KEY`, optional `OPENAI_API_BASE`)
+- `openai[alias]:model-name` -> aliased provider credentials
+
+Alias environment variables:
+- `OPENAI_COMPAT_<ALIAS>_API_KEY`
+- `OPENAI_COMPAT_<ALIAS>_BASE_URL` (or `..._API_BASE`)
+
+Example:
+```bash
+OPENAI_API_KEY=sk-proj-openai
+OPENAI_COMPAT_DEEPSEEK_API_KEY=sk-deepseek
+OPENAI_COMPAT_DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+SUPERVISOR_MODEL=openai:gpt-5.3
+RESEARCH_MODEL=openai[deepseek]:deepseek-chat
+FINAL_REPORT_MODEL=openai[deepseek]:deepseek-reasoner
+```
+
 ### Step 1: Get DeepSeek API Key
 
 1. Go to https://platform.deepseek.com/
@@ -81,20 +104,24 @@ FINAL_REPORT_MODEL=openai:deepseek-reasoner
 #### Option C: Hybrid - DeepSeek for Iterations, GPT-5 for Final Report
 
 ```bash
-# Two API keys needed
+# Native OpenAI (default openai:<model>)
 OPENAI_API_KEY=sk-proj-your-openai-key
-DEEPSEEK_API_KEY=sk-your-deepseek-key-here
+
+# DeepSeek as OpenAI-compatible alias
+OPENAI_COMPAT_DEEPSEEK_API_KEY=sk-your-deepseek-key-here
+OPENAI_COMPAT_DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 # Use DeepSeek for high-volume iterations
-SUMMARIZATION_MODEL=openai:deepseek-chat
-RESEARCH_MODEL=openai:deepseek-chat
-COMPRESSION_MODEL=openai:deepseek-chat
+SUMMARIZATION_MODEL=openai[deepseek]:deepseek-chat
+RESEARCH_MODEL=openai[deepseek]:deepseek-chat
+COMPRESSION_MODEL=openai[deepseek]:deepseek-chat
 
-# Switch to GPT-5 for final report (no base URL change needed for final report)
+# Use native OpenAI for final report
 FINAL_REPORT_MODEL=openai:gpt-5.2
+SUPERVISOR_MODEL=openai:gpt-5.3
 ```
 
-⚠️ **Note**: This requires switching base URLs mid-run. Currently not fully supported. Use Option A or B for now.
+This is fully supported: each OpenAI-compatible alias uses its own key and base URL.
 
 ---
 

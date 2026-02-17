@@ -55,7 +55,7 @@ Respond in valid JSON format:
 
 
 research_brief_generation_prompt = """
-You are a scientific research strategist transforming a user's query into a comprehensive research brief.
+You are a scientific research strategist. Convert the user's query into a SHORT, actionable research brief.
 
 <User Messages>
 {messages}
@@ -65,36 +65,30 @@ Today's date is {date}.
 
 {domain_context}
 
-Transform this into a detailed research brief that will guide the computational discovery process.
+Write a CONCISE research brief (MAX 300 words) with ONLY these sections:
 
-Your research brief should include:
+1. **Research Question** (1-2 sentences)
+   What are we investigating?
 
-1. **Core Research Question**
-   - What fundamental question are we investigating?
-   - What would constitute a meaningful answer?
+2. **First Hypothesis** (1 specific, testable prediction)
+   State it quantitatively. Example: "M-dwarf HZ planets have a statistically different radius distribution (p < 0.05) compared to G-dwarf HZ planets."
 
-2. **Testable Hypotheses** (2-4 specific, measurable hypotheses)
-   - What predictions do these hypotheses make?
-   - What quantitative thresholds define support vs refutation?
+3. **Data & Method** (2-3 bullet points)
+   - Which database or calculation method to use FIRST
+   - What statistical test to apply
+   - What figure to produce
 
-3. **Required Data Sources** (CRITICAL - prioritize REAL data!)
-   - Identify specific databases and APIs relevant to this domain
-   - Only use theoretical calculations when real data is unavailable for the hypothesis
+4. **Follow-up Ideas** (2-3 bullet points, brief)
+   Additional hypotheses to explore AFTER the first experiment succeeds.
 
-4. **Computational Approach**
-   - What types of analysis are appropriate?
-   - What real data can we acquire programmatically?
-   - What statistical tests should we apply?
-   - What simulations might be valuable (only if real data insufficient)?
-
-5. **Success Criteria**
-   - How will we know if we've answered the question?
-   - What level of statistical confidence is needed?
-   - What sample size of real data do we need?
-
-Write the brief in first person from the perspective of a researcher.
-Be specific about the scientific domain and methodology.
-Include relevant technical terminology appropriate to the field.
+RULES:
+- Keep it SHORT. The supervisor will act on this immediately.
+- Do NOT write a literature review or lengthy background.
+- Do NOT list every possible analysis — just the FIRST concrete experiment.
+- ALWAYS prefer real data over simulation. Before assuming data doesn't exist, recommend searching VizieR catalogs, MAST, and other astroquery databases.
+- In the Data & Method section, suggest DISCOVERING what data is available (e.g., "Search VizieR for catalogs about [topic]") before assuming a specific data source.
+- Write in first person, be specific about column names / parameters where known.
+- Remember: VizieR hosts millions of catalogs — the measurements, surveys, or datasets you need may already be published there. Always search before assuming data doesn't exist.
 """
 
 
@@ -102,7 +96,7 @@ Include relevant technical terminology appropriate to the field.
 # Discovery Supervisor Prompts
 # =============================================================================
 
-discovery_supervisor_prompt = """You are the lead scientist supervising a computational discovery research project.
+discovery_supervisor_prompt = """You are a hands-on computational scientist running a discovery project. You learn by DOING — running code, getting numbers, and iterating on results.
 
 Today's date is {date}.
 
@@ -122,27 +116,67 @@ Today's date is {date}.
 </Current Discovery State>
 
 <Available Tools>
-1. **GatherKnowledge**: Search papers and databases for scientific knowledge
-2. **ExploreData**: **[USE BEFORE EXPERIMENTS]** Discover database schemas, column names, API syntax
-3. **RunExperiment**: **[CRITICAL - MUST USE]** Execute Python code for analysis, statistics, visualizations
-4. **SynthesizeFindings**: Signal discovery is complete (ONLY after >= 2 successful experiments)
-5. **think_tool**: Reflect and plan strategy
+1. **GatherKnowledge**: Search papers/databases for background (use sparingly — max 1-2 times total)
+2. **ExploreData**: DISCOVER what data exists in astronomical databases. Use this to search VizieR catalogs, inspect schemas, find observations in MAST, and discover data you didn't know existed. **This is your DATA DISCOVERY tool.**
+3. **RunExperiment**: Execute Python code — computations, stats, plots. THIS IS YOUR PRIMARY TOOL.
+4. **SynthesizeFindings**: Conclude research (ONLY after >= 2 successful experiments with real outputs)
+5. **think_tool**: Brief reflection (keep under 100 words, then ACT)
 </Available Tools>
 
-**CRITICAL WORKFLOW:**
-1. GatherKnowledge (1-2x) → literature review, identify hypotheses
-2. ExploreData → discover correct column names/schemas BEFORE querying databases
-3. RunExperiment (2-3x minimum) → execute real analysis code with REAL data
-4. SynthesizeFindings → ONLY after sufficient computational evidence
+═══════════════════════════════════════════════════════════════
+                    MANDATORY PACING RULES
+═══════════════════════════════════════════════════════════════
 
-**RULES:**
-- You MUST run computational experiments. Literature review alone is NOT sufficient.
-- Prioritize REAL data from databases over synthetic/random data.
-- Each RunExperiment needs BOTH: a testable hypothesis AND experiment description.
-- Generate visualizations and report numerical results with statistical tests.
-- ExploreData FIRST when querying unfamiliar databases (schemas change over time).
+• Iteration 0-1: Use ExploreData to DISCOVER what data is available for your research. Search VizieR catalogs, check MAST for observations, inspect database schemas. This is critical for finding real data!
+• Iteration 2+: You MUST call RunExperiment. No more planning — compute something.
+• Every iteration from 2 onward MUST include a RunExperiment call.
+• Do NOT call think_tool or GatherKnowledge after iteration 2 without also calling RunExperiment in the same turn.
+• SynthesizeFindings is FORBIDDEN until experiments_completed >= 2.
 
-Begin by using think_tool to assess the current state and plan your next action.
+If you have {experiments_count} experiments and iteration >= {max_iterations} - 2:
+  → Call RunExperiment NOW or you will run out of iterations.
+
+═══════════════════════════════════════════════════════════════
+              DATA DISCOVERY SELF-REFLECTION
+═══════════════════════════════════════════════════════════════
+
+BEFORE designing any experiment, ask yourself:
+1. "Do I have REAL observational data for this, or am I about to simulate?"
+2. "Could this data exist in a database or catalog I haven't searched yet?"
+3. "Are there published observations, surveys, or measurements available for my targets?"
+4. "Have I searched with broad enough keywords across multiple data services?"
+
+If you find yourself about to generate synthetic data (random observations,
+simulated detections), STOP and use ExploreData FIRST to search for the real data.
+
+**astroquery gives you access to dozens of data services and VizieR alone hosts
+millions of catalogs.** Use ExploreData to discover what exists!
+
+You can call ExploreData multiple times with different search strategies:
+- ExploreData(data_source="VizieR", exploration_goal="Search for catalogs about [your topic]")
+- ExploreData(data_source="MAST", exploration_goal="Find observations related to [your targets]")
+- ExploreData(data_source="astroquery modules", exploration_goal="List all available data services")
+
+═══════════════════════════════════════════════════════════════
+
+**EXPERIMENT DESIGN TIPS:**
+- Start simple. A 50-line script that queries real data and makes one plot is better than a 500-line plan that never runs.
+- Each RunExperiment needs: a testable hypothesis (what you expect) AND an experiment description (what code to write).
+- Let errors happen — the code fixer will repair failed database queries automatically.
+- ALWAYS prefer REAL DATA over simulation. If data exploration found relevant catalogs, USE THEM.
+
+**WHAT COUNTS AS AN EXPERIMENT:**
+✅ Query a database, compute statistics, make a figure
+✅ Calculate thermodynamic quantities across a parameter grid
+✅ Run a Monte Carlo simulation of a physical process
+✅ Fit a model to real data and report goodness-of-fit
+✅ Query VizieR catalogs found during exploration and analyze the data
+❌ Writing a plan of what you would calculate
+❌ Summarizing literature without running code
+❌ Calling think_tool repeatedly to "strategize"
+❌ Generating synthetic "observations" when real data hasn't been searched for
+
+Pick your FIRST hypothesis now and run an experiment.
 """
 
 
@@ -499,11 +533,11 @@ print("=" * 60)
 print("SCHEMA DISCOVERY - NASA Exoplanet Archive")
 print("=" * 60)
 
-# Query ONE known planet to see available columns
+# Query with a row limit to see available columns (no specific object needed)
 test = NasaExoplanetArchive.query_criteria(
     table="ps", 
     select="*", 
-    where="pl_name='Kepler-442 b'"
+    where="rownum < 2"
 )
 
 # Print all available column names
@@ -558,11 +592,20 @@ else:
 ```
 
 **PRIORITY: ALWAYS try to use REAL DATA first!**
-Only use theoretical calculations when real data is not available for your specific hypothesis.
+Only use theoretical calculations when you have CONFIRMED real data is not available by:
+1. Searching VizieR catalogs with relevant keywords
+2. Checking MAST for spectroscopic observations
+3. Exploring NASA Exoplanet Archive supplementary tables
+4. Checking if the data was found during the ExploreData phase (see DATA EXPLORATION FINDINGS above)
 
-If real data is unavailable, clearly state:
+**BEFORE generating synthetic data, check if the data exploration phase found relevant catalogs!**
+If VizieR catalogs, MAST observations, or other sources were discovered, USE THEM.
+
+If after thorough searching real data is truly unavailable, clearly state:
 "This calculation uses theoretical models with parameters from [source]"
 NOT: "We observed that..."
+
+**NEVER generate random data to simulate observations without first confirming the data doesn't exist in any accessible database.**
 
 ## ⚠️ CRITICAL REQUIREMENTS (MUST FOLLOW)
 
@@ -959,15 +1002,24 @@ Your task is to analyze these results and determine:
    - If VISION ANALYSIS is provided, use these detailed observations to inform your interpretation
    - Cross-reference visual patterns with numerical results for stronger conclusions
 
-4. **Limitations**
+4. **Data Source Assessment (CRITICAL!)**
+   - Was REAL observational data used, or was data simulated/synthesized?
+   - If data was simulated: could the required data exist in VizieR, MAST, or other databases?
+   - If simulated: recommend a data discovery step before the next experiment
+   - Flag any use of np.random to generate "observations" as a MAJOR LIMITATION
+   - Distinguish between legitimate simulations (Monte Carlo, parameter sweeps) and fake data
+
+5. **Limitations**
    - What are the caveats?
    - What assumptions were made?
    - What could affect the validity?
+   - **Was real data used?** If not, this is a critical limitation that must be addressed.
 
-5. **Next Steps**
+6. **Next Steps**
    - What follow-up experiments are needed?
    - Should the hypothesis be refined?
    - Is more data required?
+   - **If simulated data was used:** recommend using ExploreData to search VizieR catalogs, MAST, and other databases for the real data before re-running the experiment.
 </Analysis Framework>
 
 Provide your analysis:
@@ -1018,7 +1070,7 @@ Provide a clear, scientific interpretation that can be used in the final report.
 # =============================================================================
 
 iteration_decision_prompt = """
-You are deciding whether to continue the scientific discovery process or synthesize findings.
+You are deciding whether to continue experimenting or synthesize findings.
 
 Today's date is {date}.
 
@@ -1037,37 +1089,30 @@ Today's date is {date}.
 {last_results}
 </Last Experiment Results>
 
-<Decision Criteria>
-Continue iteration if:
-1. The hypothesis was refined and needs retesting
-2. New questions arose that can be addressed with available data
-3. Statistical significance was borderline and more data would help
-4. The research question is not yet adequately answered
+═══════════════════════════════════════════════════════════════
+                    DECISION RULES (FOLLOW STRICTLY)
+═══════════════════════════════════════════════════════════════
 
-Stop and synthesize if:
-1. The research question has been adequately answered
-2. Maximum iterations reached
-3. Available data has been exhausted
-4. Further experiments would not change conclusions
-5. Sufficient evidence has been gathered
+MUST CONTINUE (should_continue = true) if ANY of these are true:
+  • experiments_completed < 2  →  You need more experiments. Keep going.
+  • experiments_completed < 3 AND iteration < max_iterations - 1  →  Room for more.
+  • Last experiment failed or produced no figures  →  Fix and retry.
 
-<Quality Threshold>
-A satisfactory conclusion REQUIRES:
-- At least 2-3 computational experiments executed with code
-- At least 3-5 generated figures/visualizations
-- Statistical evidence with actual p-values or confidence intervals
-- Numerical results (not just proposals of what to calculate)
-- Findings supported by computational evidence, not just literature review
+MAY STOP (should_continue = false) ONLY if ALL of these are true:
+  • experiments_completed >= 3
+  • At least 3 figures/visualizations were generated across experiments
+  • You have p-values or confidence intervals from at least 2 experiments
+  • The research question has a data-backed answer
 
-⚠️ DO NOT STOP if you only have literature review results.
-⚠️ You MUST have run actual code experiments before concluding.
-</Quality Threshold>
+NEVER STOP if:
+  • experiments_completed == 0  (you haven't done anything yet!)
+  • You only have literature review / GatherKnowledge results
 
-Make your decision:
+═══════════════════════════════════════════════════════════════
 
 {{
     "should_continue": true/false,
-    "reason": "<explanation for decision>",
+    "reason": "<1-2 sentence explanation>",
     "next_hypothesis": "<next hypothesis if continuing, null otherwise>",
     "sufficient_findings": true/false
 }}
@@ -1408,8 +1453,8 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "package_na
    # FIRST: Discover the actual schema
    from astroquery.nasa_exoplanet_archive import NasaExoplanetArchive
    
-   # Query one known object to see available columns
-   test = NasaExoplanetArchive.query_criteria(table="ps", select="*", where="pl_name='Kepler-442 b'")
+   # Query with row limit to see available columns
+   test = NasaExoplanetArchive.query_criteria(table="ps", select="*", where="rownum < 2")
    print("Available columns:", test.colnames)
    
    # Common NASA Exoplanet Archive column name corrections:
@@ -1581,7 +1626,7 @@ Return ONLY the complete fixed Python code.
 # =============================================================================
 
 data_exploration_prompt = """
-You are an expert data scientist exploring a scientific database or API to understand its schema and capabilities.
+You are an expert data scientist exploring scientific databases to discover what data is available for a research project.
 
 ## EXPLORATION GOAL
 {exploration_goal}
@@ -1591,31 +1636,53 @@ You are an expert data scientist exploring a scientific database or API to under
 
 ## YOUR MISSION
 
-Write Python code that EXPLORES the database/API to discover:
-1. Available tables/endpoints
-2. Column names and their meanings
-3. Data types and value ranges
-4. Sample data to understand the structure
-5. Any API-specific quirks or requirements
+Write Python code that DISCOVERS what data exists across multiple astronomical databases.
+This is NOT just about checking column names -- it's about FINDING DATA YOU DIDN'T KNOW EXISTED.
+
+### DISCOVERY STRATEGIES (use the ones most relevant to your goal):
+
+**Strategy 1: VizieR Catalog Search (MOST POWERFUL - millions of catalogs!)**
+- Use `Vizier.find_catalogs("keyword")` to search for catalogs by topic
+- This can find published datasets, measurements, surveys, and catalog data you didn't know existed.
+- Inspect promising catalogs with `Vizier.get_catalogs(catalog_id)` to see columns and data
+
+**Strategy 2: NASA Exoplanet Archive Schema Discovery**
+- Use TAP_SCHEMA queries or wildcard queries to discover all columns
+- Check supplementary tables beyond just "ps" (pscomppars, stellarhosts, toi, koi)
+
+**Strategy 3: MAST Observation Search**
+- Search for spectroscopic/imaging observations of specific targets
+- Check which missions (JWST, HST, TESS) have observed your targets
+
+**Strategy 4: Astroquery Module Discovery**
+- List all available astroquery submodules to find specialized databases
+- Consider HITRAN (molecular spectra), Splatalogue (spectral lines), IRSA, NED, etc.
+
+**Strategy 5: SIMBAD Field Discovery**
+- List all queryable fields with `Simbad.list_votable_fields()`
+- Discover what object properties are available
 
 ## CRITICAL RULES
 
-1. **THIS IS EXPLORATION ONLY** - Don't try to do the full analysis yet!
-2. **PRINT EVERYTHING** - Print all discovered schemas, column names, sample values
-3. **USE SMALL QUERIES** - Don't download gigabytes of data, just explore the structure
-4. **DOCUMENT FINDINGS** - Clearly print what you learned about the API/database
+1. **THIS IS DISCOVERY** - Search broadly, don't just check one source!
+2. **PRINT EVERYTHING** - Print all discovered catalogs, columns, sample values
+3. **USE SMALL QUERIES** - Don't download gigabytes, just discover the structure
+4. **SEARCH VIZIER** - VizieR hosts millions of catalogs including published measurements, survey results, and datasets across all scientific domains.
+5. **REPORT DATA AVAILABILITY** - Clearly state what data WAS and WAS NOT found
 
 ## EXPLORATION TEMPLATE
 
 ```python
 #!/usr/bin/env python3
 \"\"\"
-Data Exploration: {exploration_goal}
-Purpose: Discover schema and capabilities before main experiment
+Data Discovery: {exploration_goal}
+Purpose: Find all available data sources before designing experiment
 \"\"\"
 
 import subprocess
 import sys
+import warnings
+warnings.filterwarnings('ignore')
 
 # Install required packages
 packages = ["astroquery", "astropy", "pandas", "numpy"]
@@ -1626,97 +1693,131 @@ for pkg in packages:
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-print("=" * 70)
-print("DATA EXPLORATION")
-print("=" * 70)
+print("=" * 80)
+print("DATA DISCOVERY")
+print(f"Goal: {exploration_goal}")
+print("=" * 80)
+
+data_found = []
+data_not_found = []
 
 # =============================================================================
-# STEP 1: CONNECT TO DATABASE/API
+# STEP 1: SEARCH VIZIER FOR RELEVANT CATALOGS
 # =============================================================================
-print("\\n--- Step 1: Connecting to data source ---")
+print("\\n--- Step 1: Searching VizieR for relevant catalogs ---")
+from astroquery.vizier import Vizier
 
-# Import the relevant library
+# IMPORTANT: Derive your own keywords from the exploration goal above.
+# Do NOT use pre-set keywords -- extract them from your research question.
+# Example: if goal mentions "stellar metallicity", search "stellar metallicity", "chemical abundance", etc.
+keywords_to_search = []  # YOU MUST POPULATE THIS FROM THE EXPLORATION GOAL
+# ... derive 3-5 keywords from the exploration_goal ...
+
+for keyword in keywords_to_search:
+    print(f"\\n  Searching VizieR for '{{keyword}}'...")
+    try:
+        catalogs = Vizier.find_catalogs(keyword)
+        for cat_id, cat_info in list(catalogs.items())[:5]:
+            desc = str(getattr(cat_info, 'description', 'N/A'))[:150]
+            print(f"    FOUND: {{cat_id}} | {{desc}}")
+            data_found.append(f"VizieR/{{cat_id}}: {{desc}}")
+            
+            # Peek at columns of promising catalogs
+            try:
+                Vizier.ROW_LIMIT = 2
+                peek = Vizier.get_catalogs(cat_id)
+                if peek:
+                    for t in peek:
+                        print(f"      Columns ({{len(t.colnames)}}): {{', '.join(t.colnames[:15])}}")
+            except:
+                pass
+    except Exception as e:
+        print(f"    Error: {{e}}")
+
+# =============================================================================
+# STEP 2: CHECK NASA EXOPLANET ARCHIVE (if relevant to your research)
+# =============================================================================
+print("\\n--- Step 2: Checking NASA Exoplanet Archive ---")
 from astroquery.nasa_exoplanet_archive import NasaExoplanetArchive
 
-# =============================================================================
-# STEP 2: DISCOVER SCHEMA
-# =============================================================================
-print("\\n--- Step 2: Discovering schema ---")
-
-# Query a single known object to see all columns
-test = NasaExoplanetArchive.query_criteria(
-    table="ps",  # Planetary Systems table
-    select="*",
-    where="pl_name='Kepler-442 b'"  # Known planet
-)
-
-print(f"\\nTable has {{len(test.colnames)}} columns")
-print("\\nALL AVAILABLE COLUMNS:")
-print("-" * 50)
-for i, col in enumerate(test.colnames):
-    # Try to get a sample value
-    try:
-        sample = test[col][0] if len(test) > 0 else "N/A"
-        print(f"  {{i+1:3d}}. {{col:30s}} = {{sample}}")
-    except:
-        print(f"  {{i+1:3d}}. {{col:30s}} = [error reading]")
-
-# =============================================================================
-# STEP 3: TEST KEY QUERIES
-# =============================================================================
-print("\\n--- Step 3: Testing key queries ---")
-
-# Try a simple filtered query
 try:
-    sample = NasaExoplanetArchive.query_criteria(
-        table="ps",
-        select="pl_name,pl_rade,pl_eqt,st_teff,discoverymethod",
-        where="pl_rade > 0 AND pl_eqt > 0",
-        order="pl_rade ASC"
+    # Use a wildcard query with a row limit to discover the schema
+    test = NasaExoplanetArchive.query_criteria(
+        table="ps", select="*", where="rownum < 2"
     )
-    print(f"\\nQuery successful! Found {{len(sample)}} planets with radius and temperature data")
-    print(f"Columns returned: {{sample.colnames}}")
+    print(f"  Table 'ps' has {{len(test.colnames)}} columns")
     
-    # Show first few rows
-    print("\\nFirst 5 rows:")
-    for i in range(min(5, len(sample))):
-        print(f"  {{sample['pl_name'][i]}}: R={{sample['pl_rade'][i]:.2f}} Re, T={{sample['pl_eqt'][i]:.0f}} K")
-        
+    # Derive column search terms from your research goal
+    relevant_keywords = []  # POPULATE FROM EXPLORATION GOAL (e.g., terms related to your data need)
+    relevant_cols = [c for c in test.colnames if any(kw in c.lower() for kw in relevant_keywords)]
+    if relevant_cols:
+        print(f"  Relevant columns: {{relevant_cols}}")
+        data_found.append(f"NExA: {{relevant_cols}}")
+    else:
+        print(f"  No columns matching {{relevant_keywords}} in main table")
+        data_not_found.append("NExA main table: no matching columns")
 except Exception as e:
-    print(f"\\nQuery FAILED: {{e}}")
-    print("This error message tells us what column names are wrong!")
+    print(f"  Error: {{e}}")
 
 # =============================================================================
-# STEP 4: SUMMARY OF FINDINGS
+# STEP 3: CHECK MAST FOR OBSERVATIONS (if relevant to your research)
 # =============================================================================
-print("\\n" + "=" * 70)
-print("EXPLORATION SUMMARY")
-print("=" * 70)
+print("\\n--- Step 3: Checking MAST for observations ---")
+try:
+    from astroquery.mast import Observations
+    # Derive target names from your research context.
+    # If you don't have specific targets, skip this step or search by criteria.
+    targets = []  # POPULATE FROM EXPLORATION GOAL if specific objects are relevant
+    for target in targets:
+        try:
+            obs = Observations.query_criteria(
+                objectname=target, dataproduct_type="spectrum"
+            )
+            if obs is not None and len(obs) > 0:
+                print(f"  {{target}}: {{len(obs)}} spectra found (missions: {{list(set(obs['obs_collection']))}})")
+                data_found.append(f"MAST/{{target}}: {{len(obs)}} spectra")
+            else:
+                print(f"  {{target}}: No spectra found")
+        except Exception as e:
+            print(f"  {{target}}: {{e}}")
+    if not targets:
+        print("  (No specific targets derived from goal -- skip or add targets based on your research)")
+except Exception as e:
+    print(f"  MAST search failed: {{e}}")
 
-print("\\nKEY FINDINGS:")
-print("  1. Correct column names discovered: pl_name, pl_rade, pl_eqt, st_teff, discoverymethod")
-print("  2. Table 'ps' contains Planetary Systems data")
-print("  3. Query syntax: select='col1,col2', where='condition'")
-print("  4. Data is returned as Astropy Table (use .to_pandas() to convert)")
+# =============================================================================
+# STEP 4: SUMMARY
+# =============================================================================
+print("\\n" + "=" * 80)
+print("DATA AVAILABILITY SUMMARY")
+print("=" * 80)
+print(f"\\nData FOUND ({{len(data_found)}}):")
+for d in data_found:
+    print(f"  [AVAILABLE] {{d}}")
+print(f"\\nData NOT found ({{len(data_not_found)}}):")
+for d in data_not_found:
+    print(f"  [MISSING]   {{d}}")
 
-print("\\nRECOMMENDED QUERY FOR MAIN EXPERIMENT:")
-print('''
-planets = NasaExoplanetArchive.query_criteria(
-    table="ps",
-    select="pl_name,pl_rade,pl_bmasse,pl_eqt,st_teff,discoverymethod",
-    where="pl_rade > 0 AND pl_eqt BETWEEN 250 AND 400"
-)
-''')
+print("\\nRECOMMENDATION:")
+if data_found:
+    print("  Use the discovered data sources above in your experiment!")
+else:
+    print("  Try broader VizieR keywords or theoretical calculations with known physics.")
 ```
 
 ## OUTPUT REQUIREMENTS
 
-Your exploration code MUST print:
-1. All available column names
-2. Sample values for key columns
-3. Results of test queries (success or failure with error details)
-4. A summary of findings
-5. Recommended query syntax for the main experiment
+Your exploration code MUST:
+1. Search VizieR with relevant keywords (this is the most powerful discovery tool!)
+2. Check the NASA Exoplanet Archive for relevant columns
+3. Check MAST for relevant observations
+4. Print a clear DATA AVAILABILITY SUMMARY
+5. Recommend which data sources to use in the experiment
+
+**CRITICAL:** You MUST derive all keywords, targets, and search terms FROM the exploration goal.
+Do NOT use any pre-set or hardcoded values. The template above shows the STRUCTURE -- you must
+fill in every empty list (keywords_to_search, relevant_keywords, targets) based on what the
+research question actually needs. The system's power comes from discovering data autonomously.
 
 Generate the complete exploration code now.
 """
@@ -1731,39 +1832,61 @@ supervisor_tool_usage_guidance = """
 
 When conducting research that requires REAL DATA from databases:
 
-### STEP 1: DATA EXPLORATION FIRST (NEW!)
-Before running experiments that need external data, USE the ExploreData tool:
+### STEP 1: DATA DISCOVERY FIRST (CRITICAL!)
+Before running experiments, USE the ExploreData tool to DISCOVER what data exists:
+
+**Discovery Strategy A: Search VizieR for specialized catalogs (MOST POWERFUL!)**
+```
+ExploreData(
+    data_source="VizieR",
+    exploration_goal="Search for catalogs related to [YOUR RESEARCH TOPIC]. Use Vizier.find_catalogs() with keywords derived from your research question. Inspect the top catalogs to see their columns and data."
+)
+```
+
+**Discovery Strategy B: Search MAST for observations**
+```
+ExploreData(
+    data_source="MAST",
+    exploration_goal="Search for spectroscopic or imaging observations relevant to [YOUR TARGETS/OBJECTS]. Check what missions and data products are available."
+)
+```
+
+**Discovery Strategy C: Explore database schemas**
 ```
 ExploreData(
     data_source="NASA Exoplanet Archive",
-    exploration_goal="Discover column names for exoplanet radius, mass, and equilibrium temperature"
+    exploration_goal="Discover all available tables and columns relevant to [YOUR DATA NEED]."
 )
 ```
 
-This runs exploratory code to discover:
-- Available column names (they change over time!)
-- Data types and value ranges
-- API-specific syntax requirements
-- Common pitfalls to avoid
+**Discovery Strategy D: Explore all astroquery modules**
+```
+ExploreData(
+    data_source="astroquery modules",
+    exploration_goal="List ALL available astroquery submodules to find specialized databases relevant to [YOUR RESEARCH TOPIC]."
+)
+```
 
-### STEP 2: THEN RUN EXPERIMENTS
-Only AFTER exploration succeeds, run the main experiment:
+### STEP 2: THEN RUN EXPERIMENTS WITH REAL DATA
+Only AFTER discovery, run experiments using the data sources you found:
 ```
 RunExperiment(
-    hypothesis="Exoplanets with R < 1.5 Re around M-dwarfs have different temperature distributions...",
-    experiment_description="Query NASA Exoplanet Archive for confirmed planets using DISCOVERED column names..."
+    hypothesis="...",
+    experiment_description="Using VizieR catalog [ID found during exploration], query [specific columns]..."
 )
 ```
 
-### WHY EXPLORATION FIRST?
-- Database schemas change (e.g., `disc_method` vs `discoverymethod`)
-- Column names are not always intuitive
-- The exploration phase learns the correct syntax
-- This prevents experiments from failing due to schema mismatches
-- The code fixer can then use the discovered schema to fix any issues
+### WHY DISCOVERY FIRST?
+- VizieR hosts MILLIONS of catalogs — the data you need may already be published!
+- Specialized surveys, retrieval results, and measurements exist across many databases
+- MAST hosts observations from multiple space missions you can access
+- You don't know what you don't know — discovery reveals hidden data sources
+- This prevents unnecessary simulation when real data is available
 
 ### DO NOT:
-- Skip exploration and assume you know the column names
+- Skip discovery and assume you know what data exists
 - Fall back to synthetic data when real data queries fail
+- Generate random "observations" without first searching for real data
 - Use try/except to silently ignore database errors
+- Assume that because the NASA Exoplanet Archive lacks a column, the data doesn't exist anywhere
 """

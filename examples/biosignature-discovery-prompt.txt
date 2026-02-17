@@ -1,146 +1,48 @@
-Identify and computationally validate at least one novel, non-Earth-centric biosignature that could be detected remotely on exoplanets.
+Act as an autonomous computational scientist in astrobiology.
 
-⚠️ CRITICAL: YOU MUST EXECUTE PYTHON CODE TO VALIDATE YOUR PROPOSALS ⚠️
+Your mission is to discover and investigate plausible, remotely detectable, non-Earth-centric biosignatures on exoplanets, with minimal preset assumptions.
 
-This is a COMPUTATIONAL discovery system. Literature review alone is NOT ACCEPTABLE.
-For EVERY biosignature candidate, you MUST:
-1. RUN actual Python code (not just propose calculations)
-2. COMPUTE specific numbers (ΔG values, detection S/N, correlation coefficients)
-3. GENERATE at least 5 figures (spectra, phase diagrams, detectability plots)
-4. REPORT actual statistical results (p-values, confidence intervals)
+Operate like a real researcher:
+- define your own hypotheses
+- decide which experiments are most informative
+- revise direction when evidence contradicts early ideas
+- pursue unexpected but scientifically grounded leads
 
-DO NOT synthesize findings until you have executed at least 3 computational experiments.
+Do not follow a rigid checklist unless it is justified by the evolving evidence.
 
-CONTEXT:
-I am an astronomer seeking to advance astrobiology beyond Earth-centric thinking to answer: "Is there anything we can genuinely call life elsewhere in the Universe?"
+CORE PRINCIPLE
+Discovery must be evidence-driven and computational. Literature review can guide you, but your conclusions must be supported by executed code, computed results, and explicit uncertainty.
 
-REQUIREMENTS FOR NOVEL BIOSIGNATURES:
-1. Must NOT rely exclusively on Earth biomarkers (O₂, CH₄, H₂O as solvent)
-2. Must be theoretically plausible under alternative planetary conditions
-3. Must be remotely detectable with current or near-future telescopes
-4. Must offer QUANTITATIVE observational predictions (computed, not just described)
-5. Must be verifiably novel (not previously proposed in literature)
+AUTONOMY EXPECTATIONS
+- Choose your own candidate chemistries, planetary regimes, and observational strategies.
+- Select methods dynamically (thermodynamics, kinetics, spectra, statistics, target selection, simulations, or others) based on what is most useful.
+- Decide how many experiments are necessary for a strong conclusion.
+- If a path fails, document why, then pivot and continue.
 
-COMPUTATIONAL TASKS TO PERFORM:
+MINIMUM SCIENTIFIC STANDARDS
+- Execute real Python experiments (not only conceptual discussion).
+- Report concrete quantitative outputs (numbers, not only narratives).
+- Include uncertainty, limitations, and abiotic alternatives where relevant.
+- Distinguish clearly between evidence, inference, and speculation.
+- Cite the literature used to assess novelty and context.
 
-1. LITERATURE REVIEW
-   - Search ArXiv for existing biosignature research and alternative biochemistry papers
-   - Identify gaps and unexplored combinations
-   - Extract key mechanisms and patterns
-   - Verify novelty of any proposed signatures
+FREEDOM WITH ACCOUNTABILITY
+You are free to design the workflow, but you must justify each major decision:
+- Why this hypothesis?
+- Why this experiment now?
+- How do the results change your next step?
 
-2. THERMODYNAMIC MODELING
-   - Calculate Gibbs free energy for alternative metabolic reactions
-   - Model reaction energetics under various temperature/pressure conditions
-   - Identify viable energy-yielding pathways for non-Earth chemistries
-   - Test feasibility of: sulfur redox, nitrogen cycles, metal-based metabolism
+Treat the process as iterative hypothesis generation and falsification, not a predetermined script.
 
-3. SPECTRAL SIGNATURE PREDICTION
-   - Generate synthetic atmospheric transmission/emission spectra
-   - Calculate detection requirements (wavelength, resolution, S/N)
-   - Compare with JWST/ELT capabilities
-   - Model false positive scenarios
+EXPECTED OUTPUT
+Produce a research-style report that includes:
+- The final candidate biosignature(s) and why they were selected.
+- Key computational evidence (including figures/tables when useful).
+- Observational implications (e.g., detectability conditions, instrumental relevance, target types).
+- False-positive analysis and confidence level.
+- A concise "next experiments" section for follow-up work.
 
-4. STATISTICAL ANALYSIS
-   - Query NASA Exoplanet Archive for optimal detection targets
-   - Calculate statistical significance of predicted signals
-   - Perform sensitivity analysis on key parameters
-   - Generate detectability matrices
-
-5. PHASE SPACE EXPLORATION
-   - Map viable biosignature conditions (T, P, stellar type, planet mass)
-   - Generate 2D/3D phase diagrams
-   - Identify optimal planetary environments for each candidate
-
-ALTERNATIVE CHEMISTRY AREAS TO EXPLORE:
-- Non-oxygen redox couples (sulfur, nitrogen, metal-based)
-- Alternative solvents (ammonia, methane, supercritical CO₂, sulfuric acid)
-- Non-carbon backbones (silicon, nitrogen chains, boron)
-- Novel energy sources (tidal heating, magnetic induction, cosmic rays)
-- Atmospheric disequilibria beyond O₂+CH₄
-- Temporal biosignature patterns (seasonal, diurnal cycles)
-
-DELIVERABLES REQUIRED:
-1. Comprehensive report with 3-5 top candidate biosignatures
-2. Thermodynamic viability calculations with error bars
-3. Synthetic spectra showing observational signatures
-4. Phase space diagrams for each candidate
-5. Statistical significance tests
-6. Comparison table: detectability vs. novelty vs. plausibility
-7. Observational roadmap (wavelengths, targets, integration times)
-8. Publication-quality figures (10-15 minimum)
-9. Literature verification confirming novelty
-
-SCIENTIFIC RIGOR:
-- Report all p-values and confidence intervals
-- Include uncertainty propagation
-- Address abiotic false positives
-- Perform sensitivity analysis
-- Cite relevant literature
-- Use statistical hypothesis testing where appropriate
-
-ITERATE as needed to:
-- Refine hypotheses based on computational results
-- Explore promising combinations more deeply
-- Address edge cases and failure modes
-- Optimize for observational feasibility
-
-EXAMPLE STARTING POINT:
-"No comprehensive study exists on sulfur aerosol biosignatures (S₈) in super-Earth atmospheres with thick H₂ envelopes under specific UV radiation conditions from M-dwarf stars."
-
-WORKFLOW (MANDATORY):
-
-1. FIRST (1-2 iterations): GatherKnowledge
-   - Search ArXiv for biosignature literature
-   - Identify gaps and form hypothesis
-
-2. THEN (REQUIRED - at least 3 iterations): RunExperiment
-   Execute these SPECIFIC computations:
-   
-   EXPERIMENT A - Thermodynamics:
-   ```python
-   import numpy as np
-   from scipy import constants
-   
-   # Calculate Gibbs free energy for candidate reaction
-   T = np.linspace(200, 500, 100)  # K
-   P = np.logspace(-2, 3, 50)  # bar
-   # Compute ΔG(T,P) for the metabolic reaction
-   # Generate phase diagram showing viable conditions
-   ```
-   
-   EXPERIMENT B - Spectral Simulation:
-   ```python
-   import matplotlib.pyplot as plt
-   
-   # Generate synthetic spectrum for biosignature molecule
-   wavelength = np.linspace(1, 20, 10000)  # microns
-   # Calculate absorption cross-sections
-   # Compare with JWST detection limits
-   # Generate plot with error bars
-   ```
-   
-   EXPERIMENT C - Detectability Analysis:
-   ```python
-   from scipy import stats
-   
-   # Calculate S/N for transit observations
-   # Query NASA Exoplanet Archive for targets
-   # Compute required integration time
-   # Report statistical significance
-   ```
-   
-   EXPERIMENT D - Statistical Validation:
-   ```python
-   # Perform hypothesis test
-   # Calculate p-value and effect size
-   # Report confidence intervals
-   ```
-
-3. FINALLY: SynthesizeFindings (ONLY after experiments complete)
-   - Include ALL generated figures with captions
-   - Report ALL computed numerical values
-   - Cite specific code outputs as evidence
-
-⚠️ DO NOT SKIP THE RUNEXPERIMENT STEPS ⚠️
-⚠️ PROPOSALS WITHOUT CODE EXECUTION ARE REJECTED ⚠️
+IMPORTANT
+- Prefer novelty beyond standard Earth-centric biomarker logic.
+- If no robust candidate survives scrutiny, explicitly conclude that and explain what failed.
+- Scientific honesty is more important than forcing a positive result.

@@ -1,4 +1,7 @@
 outputs/
+.github/
+.cursor/
+.cursorrules
 
 *.egg-info
 *.pyc

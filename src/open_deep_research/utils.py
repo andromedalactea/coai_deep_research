@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -32,6 +33,8 @@ from tavily import AsyncTavilyClient
 from open_deep_research.configuration import Configuration, SearchAPI
 from open_deep_research.prompts import summarize_webpage_prompt
 from open_deep_research.state import ResearchComplete, Summary
+
+OPENAI_COMPAT_MODEL_PATTERN = re.compile(r"^openai\[([^\]]+)\]:(.+)$")
 
 ##########################
 # Tavily Search Tool Utils
@@ -83,10 +86,12 @@ async def tavily_search(
     
     # Initialize summarization model with retry logic
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
+    model_base_url = get_base_url_for_model(configurable.summarization_model, config)
     summarization_model = init_chat_model(
-        model=configurable.summarization_model,
+        model=get_effective_model_name(configurable.summarization_model),
         max_tokens=configurable.summarization_model_max_tokens,
         api_key=model_api_key,
+        base_url=model_base_url,
         tags=["langsmith:nostream"]
     ).with_structured_output(Summary).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
@@ -677,7 +682,7 @@ def is_token_limit_exceeded(exception: Exception, model_name: str = None) -> boo
     # Step 1: Determine provider from model name if available
     provider = None
     if model_name:
-        model_str = str(model_name).lower()
+        model_str = str(get_effective_model_name(model_name)).lower()
         if model_str.startswith('openai:'):
             provider = 'openai'
         elif model_str.startswith('anthropic:'):
@@ -837,9 +842,10 @@ def get_model_token_limit(model_string):
     Returns:
         Token limit as integer if found, None if model not in lookup table
     """
+    effective_model_string = get_effective_model_name(model_string)
     # Search through known model token limits
     for model_key, token_limit in MODEL_TOKEN_LIMITS.items():
-        if model_key in model_string:
+        if model_key in effective_model_string:
             return token_limit
     
     # Model not found in lookup table
@@ -889,29 +895,135 @@ def get_config_value(value):
     else:
         return value.value
 
+def parse_openai_compat_model(model_name: str) -> tuple[str, Optional[str]]:
+    """Parse model strings like openai[provider]:model into normalized parts."""
+    if not isinstance(model_name, str):
+        return model_name, None
+    cleaned = model_name.strip()
+    match = OPENAI_COMPAT_MODEL_PATTERN.match(cleaned)
+    if not match:
+        return cleaned, None
+    alias, model = match.groups()
+    return f"openai:{model.strip()}", alias.strip()
+
+def get_effective_model_name(model_name: str) -> str:
+    """Normalize custom OpenAI-compatible model strings for LangChain."""
+    normalized, _ = parse_openai_compat_model(model_name)
+    return normalized
+
+def _normalize_alias(alias: str) -> str:
+    """Normalize provider alias to uppercase env-safe format."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", alias).strip("_").upper()
+
+def _get_config_map(config: RunnableConfig, key: str) -> dict[str, Any]:
+    """Read optional dict maps from config.configurable."""
+    configurable = config.get("configurable", {}) if config else {}
+    value = configurable.get(key, {})
+    return value if isinstance(value, dict) else {}
+
+def _get_named_value(
+    config: RunnableConfig,
+    names: list[str],
+    *,
+    config_map_name: str,
+) -> Optional[str]:
+    """Get first non-empty value from config map or environment by name list."""
+    should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false").lower() == "true"
+    if should_get_from_config:
+        mapped = _get_config_map(config, config_map_name)
+        for name in names:
+            value = mapped.get(name)
+            if value:
+                return str(value)
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
 def get_api_key_for_model(model_name: str, config: RunnableConfig):
     """Get API key for a specific model from environment or config."""
-    should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
-    model_name = model_name.lower()
-    if should_get_from_config.lower() == "true":
-        api_keys = config.get("configurable", {}).get("apiKeys", {})
-        if not api_keys:
-            return None
-        if model_name.startswith("openai:"):
-            return api_keys.get("OPENAI_API_KEY")
-        elif model_name.startswith("anthropic:"):
-            return api_keys.get("ANTHROPIC_API_KEY")
-        elif model_name.startswith("google"):
-            return api_keys.get("GOOGLE_API_KEY")
+    effective_model_name, provider_alias = parse_openai_compat_model(model_name)
+    lowered = effective_model_name.lower()
+
+    if lowered.startswith("openai:"):
+        if provider_alias:
+            alias = _normalize_alias(provider_alias)
+            alias_key = _get_named_value(
+                config,
+                [
+                    f"OPENAI_COMPAT_{alias}_API_KEY",
+                    f"OPENAI_{alias}_API_KEY",
+                    f"{alias}_API_KEY",
+                ],
+                config_map_name="apiKeys",
+            )
+            if alias_key:
+                return alias_key
+        return _get_named_value(config, ["OPENAI_API_KEY"], config_map_name="apiKeys")
+
+    if lowered.startswith("anthropic:"):
+        return _get_named_value(config, ["ANTHROPIC_API_KEY"], config_map_name="apiKeys")
+
+    if lowered.startswith("google"):
+        return _get_named_value(config, ["GOOGLE_API_KEY"], config_map_name="apiKeys")
+
+    return None
+
+def get_base_url_for_model(model_name: str, config: RunnableConfig) -> Optional[str]:
+    """Get base URL for OpenAI-compatible providers, including aliases."""
+    effective_model_name, provider_alias = parse_openai_compat_model(model_name)
+    if not effective_model_name.lower().startswith("openai:"):
         return None
-    else:
-        if model_name.startswith("openai:"): 
-            return os.getenv("OPENAI_API_KEY")
-        elif model_name.startswith("anthropic:"):
-            return os.getenv("ANTHROPIC_API_KEY")
-        elif model_name.startswith("google"):
-            return os.getenv("GOOGLE_API_KEY")
-        return None
+
+    if provider_alias:
+        alias = _normalize_alias(provider_alias)
+        alias_base = _get_named_value(
+            config,
+            [
+                f"OPENAI_COMPAT_{alias}_BASE_URL",
+                f"OPENAI_COMPAT_{alias}_API_BASE",
+                f"OPENAI_{alias}_BASE_URL",
+                f"OPENAI_{alias}_API_BASE",
+                f"{alias}_BASE_URL",
+                f"{alias}_API_BASE",
+            ],
+            config_map_name="apiBases",
+        )
+        if alias_base:
+            return alias_base
+
+    return _get_named_value(
+        config,
+        ["OPENAI_BASE_URL", "OPENAI_API_BASE"],
+        config_map_name="apiBases",
+    )
+
+def get_model_runtime_config(
+    model_name: str,
+    config: RunnableConfig,
+    *,
+    max_tokens: Optional[int] = None,
+    tags: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Build model config with normalized model name, api_key, and optional base_url."""
+    runtime_config: dict[str, Any] = {"model": get_effective_model_name(model_name)}
+
+    if max_tokens is not None:
+        runtime_config["max_tokens"] = max_tokens
+
+    api_key = get_api_key_for_model(model_name, config)
+    if api_key:
+        runtime_config["api_key"] = api_key
+
+    base_url = get_base_url_for_model(model_name, config)
+    if base_url:
+        runtime_config["base_url"] = base_url
+
+    if tags:
+        runtime_config["tags"] = tags
+
+    return runtime_config
 
 def get_tavily_api_key(config: RunnableConfig):
     """Get Tavily API key from environment or config."""

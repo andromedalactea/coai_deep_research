@@ -15,9 +15,10 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import aiohttp
+from langchain_core.documents import Document
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -31,6 +32,139 @@ from open_deep_research.computational.state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Sources Directory Helper
+# =============================================================================
+
+def _get_sources_dir(config: RunnableConfig = None) -> Optional[str]:
+    """Extract the sources directory path from the runtime config.
+    
+    The sources directory is where downloaded articles and documents
+    are persisted for traceability and reproducibility.
+    
+    Args:
+        config: Runtime configuration that may contain sources_dir
+        
+    Returns:
+        Path to the sources directory, or None if not configured
+    """
+    if config is None:
+        return None
+    configurable = config.get("configurable", {})
+    return configurable.get("sources_dir", None)
+
+
+# =============================================================================
+# Persistent ArXiv Retriever (keeps downloaded PDFs)
+# =============================================================================
+
+def _persistent_arxiv_lazy_load(
+    wrapper,
+    query: str,
+    sources_dir: Optional[str] = None
+) -> Iterator[Document]:
+    """Load ArXiv papers, keeping downloaded PDFs in sources directory.
+    
+    This replaces the default ArxivAPIWrapper.lazy_load() which deletes
+    PDFs immediately after reading. Instead, PDFs are saved to the
+    sources directory for traceability and reproducibility.
+    
+    Args:
+        wrapper: An ArxivAPIWrapper instance (or subclass like ArxivRetriever)
+        query: Search query string
+        sources_dir: Directory to persist downloaded PDFs (None = delete after read)
+        
+    Yields:
+        Document objects with paper text and metadata
+    """
+    try:
+        import fitz
+    except ImportError:
+        raise ImportError(
+            "PyMuPDF package not found, please install it with "
+            "`pip install pymupdf`"
+        )
+
+    try:
+        query = query.replace(":", "").replace("-", "")
+        results = wrapper._fetch_results(query)
+    except wrapper.arxiv_exceptions as ex:
+        logger.debug("Error on arxiv: %s", ex)
+        return
+
+    for result in results:
+        doc_file_name = None
+        try:
+            if sources_dir:
+                os.makedirs(sources_dir, exist_ok=True)
+                arxiv_id = result.entry_id.split("/")[-1]
+                safe_id = re.sub(r'[^\w.-]', '_', arxiv_id)
+                pdf_filename = f"{safe_id}.pdf"
+                dest_path = os.path.join(sources_dir, pdf_filename)
+
+                if os.path.exists(dest_path):
+                    doc_file_name = dest_path
+                else:
+                    doc_file_name = result.download_pdf(
+                        dirpath=sources_dir,
+                        filename=pdf_filename,
+                    )
+                logger.info(f"PDF saved to sources: {doc_file_name}")
+            else:
+                doc_file_name = result.download_pdf()
+
+            with fitz.open(doc_file_name) as doc_file:
+                text: str = "".join(page.get_text() for page in doc_file)
+
+        except FileNotFoundError as f_ex:
+            logger.debug(f_ex)
+            continue
+        except Exception as e:
+            if wrapper.continue_on_failure:
+                logger.error(e)
+                continue
+            else:
+                raise e
+
+        if wrapper.load_all_available_meta:
+            extra_metadata = {
+                "entry_id": result.entry_id,
+                "published_first_time": str(result.published.date()),
+                "comment": result.comment,
+                "journal_ref": result.journal_ref,
+                "doi": result.doi,
+                "primary_category": result.primary_category,
+                "categories": result.categories,
+                "links": [link.href for link in result.links],
+            }
+        else:
+            extra_metadata = {}
+
+        metadata = {
+            "Published": str(result.updated.date()),
+            "Title": result.title,
+            "Authors": ", ".join(a.name for a in result.authors),
+            "Summary": result.summary,
+            **extra_metadata,
+        }
+
+        yield Document(
+            page_content=(
+                text[: wrapper.doc_content_chars_max]
+                if wrapper.doc_content_chars_max
+                else text
+            ),
+            metadata=metadata,
+        )
+
+        # Only delete the temp file when there is no sources directory
+        if not sources_dir and doc_file_name:
+            try:
+                os.remove(doc_file_name)
+            except OSError:
+                pass
 
 
 # =============================================================================
@@ -97,9 +231,15 @@ async def search_arxiv_papers(
             load_all_available_meta=True
         )
         
+        # Use persistent loader that keeps PDFs in sources directory
+        sources_dir = _get_sources_dir(config)
+        
         # Run in thread pool (synchronous API)
         loop = asyncio.get_event_loop()
-        docs = await loop.run_in_executor(None, lambda: retriever.invoke(query))
+        docs = await loop.run_in_executor(
+            None,
+            lambda: list(_persistent_arxiv_lazy_load(retriever, query, sources_dir))
+        )
         
         if not docs:
             return f"No papers found for query: {query}"
@@ -649,8 +789,14 @@ async def extract_paper_data(
             load_all_available_meta=True
         )
         
+        # Use persistent loader that keeps PDFs in sources directory
+        sources_dir = _get_sources_dir(config)
+        
         loop = asyncio.get_event_loop()
-        docs = await loop.run_in_executor(None, lambda: retriever.invoke(arxiv_id))
+        docs = await loop.run_in_executor(
+            None,
+            lambda: list(_persistent_arxiv_lazy_load(retriever, arxiv_id, sources_dir))
+        )
         
         if not docs:
             return None
