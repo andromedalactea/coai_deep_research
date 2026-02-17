@@ -138,6 +138,40 @@ async def tavily_search(
         formatted_output += f"SUMMARY:\n{result['content']}\n\n"
         formatted_output += "\n\n" + "-" * 80 + "\n"
     
+    # Step 8: Persist results to sources_dir for traceability
+    try:
+        from open_deep_research.retrieval.persistence import _get_sources_dir
+        sources_dir = _get_sources_dir(config)
+        if sources_dir:
+            import json as _json
+            from pathlib import Path
+            from datetime import datetime
+            web_dir = Path(sources_dir) / "web_retrieval"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            retrieval_dir = web_dir / f"legacy_tavily_{ts}"
+            retrieval_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "timestamp": datetime.now().isoformat(),
+                "queries": queries,
+                "tool": "tavily_search",
+                "sources_count": len(summarized_results),
+            }
+            (retrieval_dir / "manifest.json").write_text(
+                _json.dumps(manifest, indent=2, ensure_ascii=False)
+            )
+            for j, (url, result) in enumerate(summarized_results.items(), 1):
+                src_data = {"url": url, "title": result["title"]}
+                (retrieval_dir / f"source_{j:03d}.json").write_text(
+                    _json.dumps(src_data, indent=2, ensure_ascii=False)
+                )
+                content_str = str(result.get("content", ""))
+                if content_str:
+                    (retrieval_dir / f"source_{j:03d}.txt").write_text(
+                        content_str, encoding="utf-8"
+                    )
+    except Exception:
+        pass  # Persistence is best-effort; never break the search tool
+    
     return formatted_output
 
 async def tavily_search_async(
@@ -572,7 +606,7 @@ async def get_search_tool(search_api: SearchAPI):
     return []
     
 async def get_all_tools(config: RunnableConfig):
-    """Assemble complete toolkit including research, search, and MCP tools.
+    """Assemble complete toolkit including research, search, retrieval, and MCP tools.
     
     Args:
         config: Runtime configuration specifying search API and MCP settings
@@ -580,14 +614,27 @@ async def get_all_tools(config: RunnableConfig):
     Returns:
         List of all configured and available tools for research operations
     """
+    from open_deep_research.retrieval import contextual_retrieve
+
     # Start with core research tools
     tools = [tool(ResearchComplete), think_tool]
     
-    # Add configured search tools
+    # Add configured search tools (native OpenAI / Anthropic web search)
     configurable = Configuration.from_runnable_config(config)
     search_api = SearchAPI(get_config_value(configurable.search_api))
     search_tools = await get_search_tool(search_api)
     tools.extend(search_tools)
+
+    # Add contextual_retrieve (always-on scientific retrieval with Deep Read)
+    # This is available regardless of search_api setting because it wraps
+    # Tavily internally and adds scoring + deep-read capabilities.
+    cr_tool = contextual_retrieve
+    cr_tool.metadata = {
+        **(cr_tool.metadata or {}),
+        "type": "search",
+        "name": "contextual_retrieve",
+    }
+    tools.append(cr_tool)
     
     # Track existing tool names to prevent conflicts
     existing_tool_names = {

@@ -52,6 +52,12 @@ class TraceEventType(str, Enum):
     KNOWLEDGE_RESULT = "knowledge_result"
     DATA_EXPLORATION = "data_exploration"
     
+    # Web retrieval events (contextual_retrieve)
+    WEB_RETRIEVAL_START = "web_retrieval_start"
+    WEB_RETRIEVAL_COMPLETE = "web_retrieval_complete"
+    WEB_RETRIEVAL_NULL = "web_retrieval_null"
+    WEB_RETRIEVAL_ERROR = "web_retrieval_error"
+    
     # Hypothesis events
     HYPOTHESIS_CREATED = "hypothesis_created"
     HYPOTHESIS_STATUS_CHANGE = "hypothesis_status_change"
@@ -1108,6 +1114,53 @@ def trace_output_generated(output_id: str, output_type: str, description: str = 
     )
 
 
+def trace_web_retrieval(
+    queries: List[str],
+    mode: str,
+    sources_accepted: int,
+    sources_rejected: int,
+    saved_path: Optional[str] = None,
+    source_urls: Optional[List[str]] = None,
+    status: str = "complete",
+):
+    """Record a web retrieval event (contextual_retrieve call).
+
+    Args:
+        queries: Search queries executed.
+        mode: Retrieval mode (exploratory, verification, methods, novelty).
+        sources_accepted: Number of sources that passed scoring.
+        sources_rejected: Number of sources rejected by scoring.
+        saved_path: Path where results were persisted (if any).
+        source_urls: URLs of accepted sources.
+        status: 'complete', 'null', or 'error'.
+    """
+    event_type_map = {
+        "complete": TraceEventType.WEB_RETRIEVAL_COMPLETE,
+        "null": TraceEventType.WEB_RETRIEVAL_NULL,
+        "error": TraceEventType.WEB_RETRIEVAL_ERROR,
+    }
+    event_type = event_type_map.get(status, TraceEventType.WEB_RETRIEVAL_COMPLETE)
+
+    title = f"Web Retrieval [{mode}]: {sources_accepted} accepted, {sources_rejected} rejected"
+    if status == "null":
+        title = f"Web Retrieval [{mode}]: No evidence found"
+    elif status == "error":
+        title = f"Web Retrieval [{mode}]: Error"
+
+    TraceManager.add_event(
+        event_type=event_type,
+        title=title,
+        data={
+            "queries": queries,
+            "mode": mode,
+            "sources_accepted": sources_accepted,
+            "sources_rejected": sources_rejected,
+            "source_urls": source_urls or [],
+            "saved_path": saved_path or "",
+        },
+    )
+
+
 # =============================================================================
 # Export
 # =============================================================================
@@ -1127,4 +1180,5 @@ __all__ = [
     "trace_experiment_started",
     "trace_finding_recorded",
     "trace_output_generated",
+    "trace_web_retrieval",
 ]

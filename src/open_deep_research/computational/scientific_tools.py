@@ -837,12 +837,24 @@ async def extract_paper_data(
 # Tool Collection for Discovery System
 # =============================================================================
 
-def get_scientific_tools() -> List:
-    """Get all scientific data access tools."""
-    return [
+def get_scientific_tools(include_web_retrieval: bool = True) -> List:
+    """Get all scientific data access tools.
+    
+    Args:
+        include_web_retrieval: If True, includes contextual_retrieve for
+            web search with Deep Read capability alongside scientific DB tools.
+    """
+    tools = [
         search_arxiv_papers,
         query_nasa_exoplanet_archive,
         query_mast_archive,
         query_sdss_database,
         fetch_scientific_api,
     ]
+    if include_web_retrieval:
+        try:
+            from open_deep_research.retrieval import contextual_retrieve
+            tools.append(contextual_retrieve)
+        except ImportError:
+            logger.warning("contextual_retrieve not available — web retrieval disabled in scientific tools")
+    return tools

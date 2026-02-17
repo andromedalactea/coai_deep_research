@@ -84,12 +84,16 @@ When you are completely satisfied with the research findings returned from the t
 </Task>
 
 <Available Tools>
-You have access to three main tools:
+You have access to four main tools:
 1. **ConductResearch**: Delegate research tasks to specialized sub-agents
 2. **ResearchComplete**: Indicate that research is complete
 3. **think_tool**: For reflection and strategic planning during research
+4. **contextual_retrieve**: Search the internet directly with mode-aware scientific retrieval.
+   Modes: 'exploratory' (broad search), 'verification' (deep-reads high-authority sources for precise numerical data), 'methods' (full methodology details), 'novelty' (flags unusual claims).
+   Use this tool when you need to quickly verify a claim, check for contradictions, or gather precise data before delegating a full research task.
 
 **CRITICAL: Use think_tool before calling ConductResearch to plan your approach, and after each ConductResearch to assess progress. Do not call think_tool with any other tools in parallel.**
+**Use contextual_retrieve with mode='verification' when you need to verify specific numerical claims or resolve contradictions between sub-agents' findings.**
 </Available Tools>
 
 <Instructions>
@@ -143,12 +147,19 @@ You can use any of the tools provided to you to find resources that can help ans
 </Task>
 
 <Available Tools>
-You have access to two main tools:
-1. **tavily_search**: For conducting web searches to gather information
-2. **think_tool**: For reflection and strategic planning during research
+You have access to several research tools:
+1. **contextual_retrieve**: Mode-aware scientific web search with scoring and Deep Read capability.
+   - mode='exploratory': Broad search with summaries (use for initial landscape mapping).
+   - mode='verification': Deep-reads high-authority sources (arxiv, nasa.gov, .edu, journals) to preserve precise numerical data — error margins, p-values, spectral coefficients. Use when you need exact numbers.
+   - mode='methods': Fetches full methodology and reproducibility details from sources.
+   - mode='novelty': Flags unusual or underexplored claims for further investigation.
+2. **tavily_search**: Legacy web search (use contextual_retrieve instead when possible).
+3. **think_tool**: For reflection and strategic planning during research.
 {mcp_prompt}
 
-**CRITICAL: Use think_tool after each search to reflect on results and plan next steps. Do not call think_tool with the tavily_search or any other tools. It should be to reflect on the results of the search.**
+**CRITICAL: Use think_tool after each search to reflect on results and plan next steps. Do not call think_tool with search tools in parallel — it should be used to reflect on results.**
+**MODE SELECTION: Start with mode='exploratory' for broad searches, then switch to mode='verification' or mode='methods' when you need precise data from high-authority sources.**
+**NULL RESULTS: If contextual_retrieve returns status 'no_evidence', report this as a valid scientific finding. Do NOT retry with looser queries or hallucinate results. Absence of evidence should be reported as such.**
 </Available Tools>
 
 <Instructions>
@@ -219,6 +230,14 @@ The report should be structured like this:
 </Citation Rules>
 
 Critical Reminder: It is extremely important that any information that is even remotely relevant to the user's research topic is preserved verbatim (e.g. don't rewrite it, don't summarize it, don't paraphrase it).
+
+<Source Metadata Preservation>
+When source results include metadata from contextual_retrieve (relevance scores, authority labels, data completeness flags, retrieval method), preserve this metadata in your output:
+- Include the authority label (high/medium/low) next to each source citation.
+- If a source was retrieved via Deep Read (data_completeness='full'), note this — it means the numerical data is precise and complete.
+- If data_completeness='partial', note that the data may have been summarized and precise values should be verified.
+- If any search returned 'no_evidence' status, include this as a valid finding: "No significant evidence found for [query]". This is a legitimate scientific result.
+</Source Metadata Preservation>
 """
 
 compress_research_simple_human_message = """All above messages are about research conducted by an AI Researcher. Please clean up these findings.

@@ -250,6 +250,80 @@ class Configuration(BaseModel):
             }
         }
     )
+    # Enhanced Retrieval Configuration
+    retrieval_mode: str = Field(
+        default="exploratory",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "select",
+                "default": "exploratory",
+                "description": "Default retrieval mode for contextual_retrieve. 'exploratory' uses Tavily summaries; 'verification' and 'methods' use Deep Read on high-authority sources to preserve numerical data; 'novelty' flags unusual claims.",
+                "options": [
+                    {"label": "Exploratory", "value": "exploratory"},
+                    {"label": "Verification (Deep Read)", "value": "verification"},
+                    {"label": "Methods (Deep Read)", "value": "methods"},
+                    {"label": "Novelty", "value": "novelty"},
+                ]
+            }
+        }
+    )
+    min_source_score: float = Field(
+        default=0.3,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 0.3,
+                "min": 0.0,
+                "max": 1.0,
+                "description": "Minimum composite score (0-1) for a source to be accepted. Sources below this threshold are rejected with a reason."
+            }
+        }
+    )
+    deep_read_timeout: int = Field(
+        default=30,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 30,
+                "min": 5,
+                "max": 120,
+                "description": "Timeout in seconds for Deep Read HTTP requests (raw content fetching)."
+            }
+        }
+    )
+    enable_deep_read: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable Deep Read for verification/methods modes. When disabled, all modes use Tavily summarization."
+            }
+        }
+    )
+    high_authority_domains: Optional[List[str]] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Comma-separated list of additional high-authority domains for Deep Read (e.g. 'myinstitution.edu,custom-journal.org'). Added to built-in list."
+            }
+        }
+    )
+
+    # Output / Persistence Configuration
+    sources_dir: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Directory path where retrieved sources (web pages, PDFs, tables) are saved for traceability. When set, contextual_retrieve and scientific tools persist all fetched data here. Typically set automatically by runner scripts (e.g. run_discovery.py)."
+            }
+        }
+    )
+
     # MCP server configuration
     mcp_config: Optional[MCPConfig] = Field(
         default=None,

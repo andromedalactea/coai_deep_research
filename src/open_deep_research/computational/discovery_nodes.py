@@ -698,7 +698,14 @@ async def discovery_supervisor(
             )
         )
     
-    supervisor_tools = [GatherKnowledge, ExploreData, RunExperiment, SynthesizeFindings, think_tool]
+    # Include contextual_retrieve so the discovery supervisor can search the
+    # web directly when experiments yield unexpected results or when it needs
+    # to verify a hypothesis against existing literature mid-discovery.
+    try:
+        from open_deep_research.retrieval import contextual_retrieve as _cr_tool
+        supervisor_tools = [GatherKnowledge, ExploreData, RunExperiment, SynthesizeFindings, think_tool, _cr_tool]
+    except ImportError:
+        supervisor_tools = [GatherKnowledge, ExploreData, RunExperiment, SynthesizeFindings, think_tool]
     
     supervisor_model = (
         configurable_model
@@ -915,6 +922,24 @@ async def supervisor_tools(
                 name="think_tool",
                 tool_call_id=tool_id
             ))
+        
+        elif tool_name == "contextual_retrieve":
+            # Execute contextual_retrieve directly so the supervisor can
+            # search the web mid-discovery when unexpected results appear.
+            try:
+                from open_deep_research.retrieval import contextual_retrieve as _cr
+                result = await _cr.ainvoke(tool_args, config)
+                all_tool_messages.append(ToolMessage(
+                    content=str(result),
+                    name="contextual_retrieve",
+                    tool_call_id=tool_id
+                ))
+            except Exception as e:
+                all_tool_messages.append(ToolMessage(
+                    content=f"contextual_retrieve error: {e}",
+                    name="contextual_retrieve",
+                    tool_call_id=tool_id
+                ))
         
         else:
             # Unknown tool - still respond to avoid API errors

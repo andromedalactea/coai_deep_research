@@ -39,6 +39,7 @@ from open_deep_research.state import (
     ResearchQuestion,
     SupervisorState,
 )
+from open_deep_research.retrieval import contextual_retrieve
 from open_deep_research.utils import (
     anthropic_websearch_called,
     get_all_tools,
@@ -207,8 +208,9 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     configurable = Configuration.from_runnable_config(config)
     research_model_config = get_supervisor_model_config(configurable, config)
     
-    # Available tools: research delegation, completion signaling, and strategic thinking
-    lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool]
+    # Available tools: research delegation, completion signaling, strategic thinking,
+    # and contextual_retrieve for direct supervisor verification searches.
+    lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool, contextual_retrieve]
     
     # Configure model with tools, retry logic, and model settings
     research_model = (
@@ -288,6 +290,25 @@ async def supervisor_tools(state: SupervisorState, config: RunnableConfig) -> Co
             tool_call_id=tool_call["id"]
         ))
     
+    # Handle contextual_retrieve calls (supervisor direct search)
+    retrieve_calls = [
+        tool_call for tool_call in most_recent_message.tool_calls
+        if tool_call["name"] == "contextual_retrieve"
+    ]
+    if retrieve_calls:
+        from open_deep_research.utils import execute_tool_safely
+        retrieve_tasks = [
+            execute_tool_safely(contextual_retrieve, tool_call["args"], config)
+            for tool_call in retrieve_calls
+        ]
+        retrieve_results = await asyncio.gather(*retrieve_tasks)
+        for result, tool_call in zip(retrieve_results, retrieve_calls):
+            all_tool_messages.append(ToolMessage(
+                content=result,
+                name="contextual_retrieve",
+                tool_call_id=tool_call["id"]
+            ))
+
     # Handle ConductResearch calls (research delegation)
     conduct_research_calls = [
         tool_call for tool_call in most_recent_message.tool_calls 

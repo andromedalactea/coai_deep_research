@@ -1119,17 +1119,50 @@ async def save_outputs(result: dict, output_dir: Path = None, run_dir: Path = No
     sources_dir = run_dir / "sources"
     if sources_dir.exists():
         source_files = list(sources_dir.iterdir())
-        metadata["sources_count"] = len(source_files)
-        metadata["sources"] = [f.name for f in source_files]
+        metadata["sources_count"] = len([f for f in source_files if f.is_file()])
+        metadata["sources"] = [f.name for f in source_files if f.is_file()]
+    
+    # Include web retrieval information in metadata
+    web_retrieval_dir = sources_dir / "web_retrieval" if sources_dir.exists() else None
+    if web_retrieval_dir and web_retrieval_dir.exists():
+        retrieval_runs = [d for d in web_retrieval_dir.iterdir() if d.is_dir()]
+        web_retrieval_meta = {
+            "total_retrieval_calls": len(retrieval_runs),
+            "null_result_calls": len([d for d in retrieval_runs if d.name.endswith("_null")]),
+            "successful_calls": len([d for d in retrieval_runs if not d.name.endswith("_null")]),
+            "retrieval_dirs": [d.name for d in sorted(retrieval_runs)],
+        }
+        # Count total accepted sources across all runs
+        total_accepted = 0
+        all_urls = []
+        for rd in retrieval_runs:
+            manifest_path = rd / "manifest.json"
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                    total_accepted += manifest.get("sources_accepted", 0)
+                except Exception:
+                    pass
+            for sf in rd.glob("source_*.json"):
+                try:
+                    src_meta = json.loads(sf.read_text())
+                    url = src_meta.get("url", "")
+                    if url:
+                        all_urls.append(url)
+                except Exception:
+                    pass
+        web_retrieval_meta["total_sources_saved"] = total_accepted
+        web_retrieval_meta["unique_urls"] = list(set(all_urls))
+        metadata["web_retrieval"] = web_retrieval_meta
     
     meta_path = run_dir / f"metadata_{timestamp}.json"
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"   📋 Metadata: {meta_path}")
     
-    # Report on saved sources
+    # Report on saved sources (articles/PDFs)
     if sources_dir.exists():
-        source_files = list(sources_dir.iterdir())
+        source_files = [f for f in sources_dir.iterdir() if f.is_file()]
         if source_files:
             print(f"   📚 Sources: {len(source_files)} document(s) in {sources_dir}")
             for sf in source_files:
@@ -1137,6 +1170,18 @@ async def save_outputs(result: dict, output_dir: Path = None, run_dir: Path = No
                 print(f"      - {sf.name} ({size_kb:.1f} KB)")
         else:
             print(f"   📚 Sources: (no documents downloaded)")
+    
+    # Report on web retrieval data
+    if web_retrieval_dir and web_retrieval_dir.exists():
+        retrieval_runs = [d for d in web_retrieval_dir.iterdir() if d.is_dir()]
+        if retrieval_runs:
+            successful = [d for d in retrieval_runs if not d.name.endswith("_null")]
+            null_runs = [d for d in retrieval_runs if d.name.endswith("_null")]
+            print(f"   🌐 Web Retrieval: {len(retrieval_runs)} call(s) ({len(successful)} with results, {len(null_runs)} null)")
+            total_size = sum(
+                f.stat().st_size for rd in retrieval_runs for f in rd.rglob("*") if f.is_file()
+            )
+            print(f"      Total data saved: {total_size / 1024:.1f} KB")
     
     print(f"\n✅ All outputs saved to {run_dir}")
 
