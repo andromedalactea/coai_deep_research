@@ -153,6 +153,48 @@ class ComputationalConfiguration(BaseConfiguration):
             }
         }
     )
+
+    # ==========================================================================
+    # Claim Validation / Replication Gate
+    # ==========================================================================
+
+    claim_validation_min_novelty_confidence: float = Field(
+        default=0.6,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 0.6,
+                "min": 0.0,
+                "max": 1.0,
+                "description": "Minimum novelty confidence for a claim to be eligible for validated status."
+            }
+        }
+    )
+
+    require_replication_for_novel_claims: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Require a replication check for high-impact novel claims before validating them."
+            }
+        }
+    )
+
+    max_replication_attempts: int = Field(
+        default=1,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 1,
+                "min": 1,
+                "max": 3,
+                "step": 1,
+                "description": "Maximum replication attempts per claim when replication is required."
+            }
+        }
+    )
     
     # ==========================================================================
     # Scientific Domain Settings

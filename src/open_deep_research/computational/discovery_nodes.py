@@ -16,6 +16,7 @@ import os
 import re
 import uuid
 from datetime import datetime
+from time import perf_counter
 from typing import Any, Dict, List, Literal, Optional
 
 from langchain.chat_models import init_chat_model
@@ -45,12 +46,19 @@ from open_deep_research.computational.traceability import (
     TraceManager,
     trace_node_enter,
     trace_node_exit,
+    trace_phase_start,
+    trace_phase_end,
+    trace_performance_metric,
     trace_code_execution,
     trace_supervisor_decision,
     trace_hypothesis_created,
     trace_experiment_started,
     trace_finding_recorded,
     trace_output_generated,
+    trace_claim_created,
+    trace_claim_validated,
+    trace_claim_rejected,
+    trace_replication_check,
 )
 from open_deep_research.computational.prompts import (
     discovery_clarification_prompt,
@@ -76,6 +84,9 @@ from open_deep_research.computational.state import (
     ExperimentPlan,
     ExperimentRecord,
     ExperimentStatus,
+    ClaimValidationRecord,
+    ClaimStatus,
+    ReplicationStatus,
     Finding,
     GeneratedHypothesis,
     HypothesisRecord,
@@ -249,6 +260,113 @@ def summarize_findings(findings: List[Finding]) -> str:
             summaries.append(f"   Evidence: {f.statistical_evidence}")
     
     return "\n".join(summaries)
+
+
+def _elapsed_seconds(start: float) -> float:
+    """Return elapsed seconds from a perf_counter start mark."""
+    return max(0.0, perf_counter() - start)
+
+
+def summarize_claim_ledger(claim_ledger: List[ClaimValidationRecord]) -> str:
+    """Create a concise summary of validated/provisional/rejected claims."""
+    if not claim_ledger:
+        return "No claim validation records available."
+
+    sections = []
+    status_groups = {
+        ClaimStatus.VALIDATED: [],
+        ClaimStatus.PROVISIONAL: [],
+        ClaimStatus.INCONCLUSIVE: [],
+        ClaimStatus.REJECTED: [],
+    }
+    for claim in claim_ledger:
+        status_groups.get(claim.status, status_groups[ClaimStatus.PROVISIONAL]).append(claim)
+
+    for status in (
+        ClaimStatus.VALIDATED,
+        ClaimStatus.PROVISIONAL,
+        ClaimStatus.INCONCLUSIVE,
+        ClaimStatus.REJECTED,
+    ):
+        claims = status_groups.get(status, [])
+        if not claims:
+            continue
+        sections.append(f"### Claims [{status.value}] ({len(claims)})")
+        for claim in claims:
+            sections.append(
+                f"- {claim.claim_text[:180]} "
+                f"(novelty_confidence={claim.novelty_confidence:.2f}, "
+                f"replication={claim.replication_status.value})"
+            )
+            if claim.verdict_reason:
+                sections.append(f"  Reason: {claim.verdict_reason[:220]}")
+        sections.append("")
+    return "\n".join(sections)
+
+
+def _extract_primary_source_urls(state: ComputationalDiscoveryState, limit: int = 6) -> List[str]:
+    """Extract representative URLs from knowledge/data source state for claim provenance."""
+    urls: List[str] = []
+    for paper in state.get("papers", []):
+        if getattr(paper, "url", None):
+            urls.append(str(paper.url))
+    for source in state.get("data_sources", []):
+        candidate = getattr(source, "url", None)
+        if candidate:
+            urls.append(str(candidate))
+    deduped = []
+    seen = set()
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped[:limit]
+
+
+def _estimate_novelty_confidence(
+    confidence_level: str,
+    has_stats: bool,
+    has_contradictions: bool,
+    simulation_penalty: bool,
+) -> float:
+    """Deterministic confidence estimator for claim novelty confidence."""
+    base = {"low": 0.35, "medium": 0.6, "high": 0.8}.get((confidence_level or "").lower(), 0.4)
+    if has_stats:
+        base += 0.1
+    if has_contradictions:
+        base -= 0.25
+    if simulation_penalty:
+        base -= 0.2
+    return max(0.0, min(1.0, base))
+
+
+def _build_replication_code(original_code: str) -> str:
+    """Inject a reproducibility preamble and perturb deterministic seeds."""
+    patched = re.sub(r"np\.random\.seed\(\s*\d+\s*\)", "np.random.seed(1337)", original_code)
+    patched = re.sub(r"random\.seed\(\s*\d+\s*\)", "random.seed(1337)", patched)
+    preamble = (
+        "# --- Replication preamble (auto-generated) ---\n"
+        "import random\n"
+        "random.seed(1337)\n"
+        "try:\n"
+        "    import numpy as np\n"
+        "    np.random.seed(1337)\n"
+        "except Exception:\n"
+        "    pass\n\n"
+    )
+    return preamble + patched
+
+
+def _extract_boolean_hypothesis_signal(text: str) -> Optional[bool]:
+    """Infer support/refute signal from experiment output text if available."""
+    if not text:
+        return None
+    upper = text.upper()
+    if "HYPOTHESIS NOT SUPPORTED" in upper or "NOT SUPPORTED" in upper:
+        return False
+    if "HYPOTHESIS SUPPORTED" in upper or "SUPPORTED" in upper:
+        return True
+    return None
 
 
 def summarize_experiments(experiments: List[ExperimentRecord]) -> str:
@@ -482,12 +600,28 @@ async def clarify_discovery_query(
     This node analyzes the user's research query and determines if
     clarification is needed before proceeding with the discovery process.
     """
+    node_start = perf_counter()
     configurable = ComputationalConfiguration.from_runnable_config(config)
+    trace_node_enter("clarify_discovery_query")
+    trace_phase_start("clarify_discovery_query.total", node_name="clarify_discovery_query")
     
     # Check if clarification is allowed
     # Also check environment variable directly for robustness
     env_allow = os.getenv("ALLOW_CLARIFICATION", "").lower()
     if not configurable.allow_clarification or env_allow in ("false", "0", "no"):
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "clarify_discovery_query.total",
+            total_duration,
+            node_name="clarify_discovery_query",
+            data={"skipped": True, "reason": "clarification_disabled"},
+        )
+        trace_node_exit(
+            "clarify_discovery_query",
+            success=True,
+            data={"duration_seconds": total_duration, "skipped": True},
+        )
+        logger.info("Timing clarify_discovery_query total=%.2fs (skipped)", total_duration)
         return Command(goto="generate_research_brief")
     
     messages = state.get("messages", [])
@@ -509,17 +643,54 @@ async def clarify_discovery_query(
             .with_config(model_config)
         )
         
+        model_start = perf_counter()
         response = await invoke_model_with_timeout(
             clarification_model, [HumanMessage(content=prompt)],
             timeout=MODEL_INVOKE_TIMEOUT, label="clarify_discovery_query"
         )
+        model_duration = _elapsed_seconds(model_start)
+        trace_performance_metric(
+            "clarify_discovery_query.model_invoke",
+            model_duration,
+            node_name="clarify_discovery_query",
+            data={"model": configurable.research_model},
+        )
         
         if response.need_clarification:
+            total_duration = _elapsed_seconds(node_start)
+            trace_phase_end(
+                "clarify_discovery_query.total",
+                total_duration,
+                node_name="clarify_discovery_query",
+                data={"need_clarification": True, "model_duration_seconds": model_duration},
+            )
+            trace_node_exit(
+                "clarify_discovery_query",
+                success=True,
+                data={"duration_seconds": total_duration, "need_clarification": True},
+            )
             return Command(
                 goto=END,
                 update={"messages": [AIMessage(content=response.question)]}
             )
         else:
+            total_duration = _elapsed_seconds(node_start)
+            trace_phase_end(
+                "clarify_discovery_query.total",
+                total_duration,
+                node_name="clarify_discovery_query",
+                data={"need_clarification": False, "model_duration_seconds": model_duration},
+            )
+            trace_node_exit(
+                "clarify_discovery_query",
+                success=True,
+                data={"duration_seconds": total_duration, "need_clarification": False},
+            )
+            logger.info(
+                "Timing clarify_discovery_query total=%.2fs model=%.2fs",
+                total_duration,
+                model_duration,
+            )
             return Command(
                 goto="generate_research_brief",
                 update={"messages": [AIMessage(content=response.verification)]}
@@ -533,9 +704,34 @@ async def clarify_discovery_query(
             
             # Fallback: just proceed without clarification
             # Since the query is likely detailed enough if clarification is enabled
+            total_duration = _elapsed_seconds(node_start)
+            trace_phase_end(
+                "clarify_discovery_query.total",
+                total_duration,
+                node_name="clarify_discovery_query",
+                data={"fallback_used": True, "fallback_reason": "structured_output_unsupported"},
+            )
+            trace_node_exit(
+                "clarify_discovery_query",
+                success=True,
+                data={"duration_seconds": total_duration, "fallback_used": True},
+            )
             return Command(goto="generate_research_brief")
         else:
             # Re-raise other errors
+            total_duration = _elapsed_seconds(node_start)
+            trace_phase_end(
+                "clarify_discovery_query.total",
+                total_duration,
+                success=False,
+                node_name="clarify_discovery_query",
+                data={"error": str(e)[:500]},
+            )
+            trace_node_exit(
+                "clarify_discovery_query",
+                success=False,
+                data={"duration_seconds": total_duration, "error": str(e)[:500]},
+            )
             raise
 
 
@@ -548,14 +744,22 @@ async def generate_research_brief(
     This transforms the user's messages into a structured research brief
     that will guide the entire discovery process.
     """
+    node_start = perf_counter()
     configurable = ComputationalConfiguration.from_runnable_config(config)
     messages = state.get("messages", [])
     model_config = get_supervisor_model_config(configurable, config)
     
     # Initialize trace if not already done
     trace_node_enter("generate_research_brief")
+    trace_phase_start("generate_research_brief.total", node_name="generate_research_brief")
     
     research_query = get_buffer_string(messages)
+
+    if TraceManager.get_trace() is None:
+        TraceManager.start_trace(
+            research_query=research_query,
+            config={"configurable": dict(config.get("configurable", {}))} if config else {},
+        )
     
     research_model = configurable_model.with_config(model_config)
     
@@ -569,10 +773,12 @@ async def generate_research_brief(
         domain_context=domain_context
     )
     
+    model_start = perf_counter()
     response = await invoke_model_with_timeout(
         research_model, [HumanMessage(content=prompt)],
         timeout=MODEL_INVOKE_TIMEOUT, label="generate_research_brief"
     )
+    model_duration = _elapsed_seconds(model_start)
     research_brief = response.content
     
     # Record the research brief generation
@@ -586,6 +792,7 @@ async def generate_research_brief(
             "research_brief_length": len(research_brief),
             "model": configurable.research_model,
             "scientific_domain": domain.value if hasattr(domain, 'value') else str(domain),
+            "model_duration_seconds": model_duration,
         },
         success=True
     )
@@ -595,6 +802,38 @@ async def generate_research_brief(
     if trace:
         trace.research_query = research_query
         trace.research_brief = research_brief
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_performance_metric(
+        "generate_research_brief.model_invoke",
+        model_duration,
+        node_name="generate_research_brief",
+        data={"model": configurable.research_model},
+    )
+    trace_phase_end(
+        "generate_research_brief.total",
+        total_duration,
+        node_name="generate_research_brief",
+        data={
+            "model_duration_seconds": model_duration,
+            "research_query_length": len(research_query),
+            "research_brief_length": len(research_brief),
+        },
+    )
+    trace_node_exit(
+        "generate_research_brief",
+        success=True,
+        data={
+            "duration_seconds": total_duration,
+            "model_duration_seconds": model_duration,
+            "research_brief_length": len(research_brief),
+        },
+    )
+    logger.info(
+        "Timing generate_research_brief total=%.2fs model=%.2fs",
+        total_duration,
+        model_duration,
+    )
     
     # Generate trace ID for this run
     trace_id = str(uuid.uuid4())[:12]
@@ -619,6 +858,8 @@ async def generate_research_brief(
                     "research_query": research_query[:1000],
                     "research_brief": research_brief[:2000],
                     "model": configurable.research_model,
+                    "node_duration_seconds": total_duration,
+                    "model_duration_seconds": model_duration,
                 }
             }],
             # Initialize supervisor_messages with just the research brief
@@ -647,8 +888,16 @@ async def discovery_supervisor(
     This prevents context pollution from accumulated tool messages and
     ensures the supervisor always has clean, relevant context.
     """
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
     configurable = ComputationalConfiguration.from_runnable_config(config)
     model_config = get_supervisor_model_config(configurable, config)
+    trace_node_enter("discovery_supervisor", iteration=iteration)
+    trace_phase_start(
+        "discovery_supervisor.total",
+        node_name="discovery_supervisor",
+        iteration=iteration,
+    )
     
     # Define supervisor tools
     from pydantic import BaseModel, Field
@@ -733,6 +982,7 @@ async def discovery_supervisor(
         from open_deep_research.computational.context import get_data_discovery_guidance
         domain_context += "\n" + get_data_discovery_guidance()
     
+    prompt_build_start = perf_counter()
     progress_summary = build_progress_summary(state)
     
     # Build fresh system prompt with current state
@@ -784,11 +1034,57 @@ async def discovery_supervisor(
     
     # Build the message list: fresh system prompt + recent conversation
     messages_for_model = [SystemMessage(content=system_prompt)] + recent_messages
+    prompt_build_duration = _elapsed_seconds(prompt_build_start)
     
     # Invoke supervisor with timeout protection
+    model_start = perf_counter()
     response = await invoke_model_with_timeout(
         supervisor_model, messages_for_model,
         timeout=MODEL_INVOKE_TIMEOUT, label="discovery_supervisor"
+    )
+    model_duration = _elapsed_seconds(model_start)
+    total_duration = _elapsed_seconds(node_start)
+    trace_performance_metric(
+        "discovery_supervisor.prompt_build",
+        prompt_build_duration,
+        node_name="discovery_supervisor",
+        iteration=iteration,
+        data={"recent_messages_count": len(recent_messages)},
+    )
+    trace_performance_metric(
+        "discovery_supervisor.model_invoke",
+        model_duration,
+        node_name="discovery_supervisor",
+        iteration=iteration,
+        data={"model": configurable.supervisor_model or configurable.research_model},
+    )
+    trace_phase_end(
+        "discovery_supervisor.total",
+        total_duration,
+        node_name="discovery_supervisor",
+        iteration=iteration,
+        data={
+            "prompt_build_duration_seconds": prompt_build_duration,
+            "model_duration_seconds": model_duration,
+            "message_count": len(messages_for_model),
+        },
+    )
+    trace_node_exit(
+        "discovery_supervisor",
+        iteration=iteration,
+        success=True,
+        data={
+            "duration_seconds": total_duration,
+            "model_duration_seconds": model_duration,
+            "tool_calls_count": len(getattr(response, "tool_calls", []) or []),
+        },
+    )
+    logger.info(
+        "Timing discovery_supervisor iteration=%s total=%.2fs prompt=%.2fs model=%.2fs",
+        iteration,
+        total_duration,
+        prompt_build_duration,
+        model_duration,
     )
     
     return Command(
@@ -805,9 +1101,16 @@ async def supervisor_tools(
     config: RunnableConfig
 ) -> Command[Literal["discovery_supervisor", "gather_knowledge", "explore_data", "run_experiment", "synthesize_findings", "__end__"]]:
     """Execute tools called by the discovery supervisor."""
+    node_start = perf_counter()
     configurable = ComputationalConfiguration.from_runnable_config(config)
     supervisor_messages = state.get("supervisor_messages", [])
     discovery_iterations = state.get("discovery_iterations", 0)
+    trace_node_enter("supervisor_tools", iteration=discovery_iterations)
+    trace_phase_start(
+        "supervisor_tools.total",
+        node_name="supervisor_tools",
+        iteration=discovery_iterations,
+    )
     
     most_recent_message = supervisor_messages[-1]
     
@@ -826,6 +1129,20 @@ async def supervisor_tools(
             data={"reason": exit_reason, "exceeded_iterations": exceeded_iterations},
             success=True
         )
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "supervisor_tools.total",
+            total_duration,
+            node_name="supervisor_tools",
+            iteration=discovery_iterations,
+            data={"exit_reason": exit_reason},
+        )
+        trace_node_exit(
+            "supervisor_tools",
+            iteration=discovery_iterations,
+            success=True,
+            data={"duration_seconds": total_duration, "exit_reason": exit_reason},
+        )
         return Command(goto="synthesize_findings")
     
     # Generate ToolMessage responses for ALL tool calls to satisfy API requirements
@@ -833,7 +1150,9 @@ async def supervisor_tools(
     primary_action = None
     primary_update = {}
     
+    tool_timing_details: List[Dict[str, Any]] = []
     for tool_call in most_recent_message.tool_calls:
+        tool_start = perf_counter()
         tool_name = tool_call["name"]
         tool_args = tool_call["args"]
         tool_id = tool_call["id"]
@@ -948,6 +1267,22 @@ async def supervisor_tools(
                 name=tool_name,
                 tool_call_id=tool_id
             ))
+
+        tool_duration = _elapsed_seconds(tool_start)
+        tool_timing_details.append(
+            {
+                "tool": tool_name,
+                "duration_seconds": tool_duration,
+                "has_error": any("error" in str(msg.content).lower() for msg in all_tool_messages[-1:]),
+            }
+        )
+        trace_performance_metric(
+            f"supervisor_tools.tool.{tool_name}",
+            tool_duration,
+            node_name="supervisor_tools",
+            iteration=discovery_iterations,
+            data={"tool_name": tool_name, "tool_call_id": tool_id},
+        )
     
     # ==========================================================================
     # TRACEABILITY: Record the supervisor decision
@@ -977,7 +1312,10 @@ async def supervisor_tools(
             "hypotheses_count": len(state.get("hypotheses", [])),
             "experiments_count": len(state.get("experiments", [])),
             "findings_count": len(state.get("findings", [])),
-        }
+        },
+        "timing": {
+            "tools": tool_timing_details,
+        },
     }
     
     # Also emit to TraceManager
@@ -991,6 +1329,34 @@ async def supervisor_tools(
         hypotheses_count=len(state.get("hypotheses", [])),
         experiments_count=len(state.get("experiments", [])),
         findings_count=len(state.get("findings", [])),
+    )
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "supervisor_tools.total",
+        total_duration,
+        node_name="supervisor_tools",
+        iteration=discovery_iterations,
+        data={
+            "tool_calls_count": len(most_recent_message.tool_calls),
+            "selected_action": primary_action or "return_to_supervisor",
+            "tool_timings": tool_timing_details,
+        },
+    )
+    trace_node_exit(
+        "supervisor_tools",
+        iteration=discovery_iterations,
+        success=True,
+        data={
+            "duration_seconds": total_duration,
+            "selected_action": primary_action or "return_to_supervisor",
+        },
+    )
+    logger.info(
+        "Timing supervisor_tools iteration=%s total=%.2fs tools=%s",
+        discovery_iterations,
+        total_duration,
+        ", ".join([f"{t['tool']}:{t['duration_seconds']:.2f}s" for t in tool_timing_details]) or "none",
     )
     
     # Determine where to route
@@ -1057,8 +1423,12 @@ async def gather_knowledge(
     - Builds a cumulative knowledge_summary for context management
     - Extracts structured data from tool results
     """
+    node_start = perf_counter()
     configurable = ComputationalConfiguration.from_runnable_config(config)
     model_config = get_worker_model_config(configurable, config)
+    iteration = state.get("discovery_iterations", 0)
+    trace_node_enter("gather_knowledge", iteration=iteration)
+    trace_phase_start("gather_knowledge.total", node_name="gather_knowledge", iteration=iteration)
     
     knowledge_request = state.get("_knowledge_request", state.get("research_brief", ""))
     
@@ -1091,23 +1461,45 @@ async def gather_knowledge(
     new_papers = []
     new_data_sources = []
     max_iterations = 5
+    loop_timing: List[Dict[str, Any]] = []
     
     for iter_num in range(max_iterations):
+        iteration_start = perf_counter()
+        model_iter_start = perf_counter()
         response = await invoke_model_with_timeout(
             knowledge_model, messages,
             timeout=MODEL_INVOKE_TIMEOUT, label=f"gather_knowledge_iter_{iter_num}"
         )
+        model_iter_duration = _elapsed_seconds(model_iter_start)
+        trace_performance_metric(
+            "gather_knowledge.model_iteration",
+            model_iter_duration,
+            node_name="gather_knowledge",
+            iteration=iteration,
+            data={"loop_iteration": iter_num},
+        )
         messages.append(response)
         
         if not response.tool_calls:
+            loop_timing.append(
+                {
+                    "iteration": iter_num,
+                    "model_duration_seconds": model_iter_duration,
+                    "tool_calls_count": 0,
+                    "iteration_duration_seconds": _elapsed_seconds(iteration_start),
+                }
+            )
             break
         
         # Execute tool calls
+        iter_tools: List[Dict[str, Any]] = []
         for tool_call in response.tool_calls:
             tool = next((t for t in tools if t.name == tool_call["name"]), None)
             if tool:
                 try:
+                    tool_start = perf_counter()
                     result = await tool.ainvoke(tool_call["args"], config)
+                    tool_duration = _elapsed_seconds(tool_start)
                     result_str = str(result)
                     gathered_info.append({
                         "tool": tool_call["name"],
@@ -1119,6 +1511,21 @@ async def gather_knowledge(
                         name=tool_call["name"],
                         tool_call_id=tool_call["id"]
                     ))
+                    iter_tools.append(
+                        {
+                            "tool": tool_call["name"],
+                            "duration_seconds": tool_duration,
+                            "success": True,
+                            "result_length": len(result_str),
+                        }
+                    )
+                    trace_performance_metric(
+                        f"gather_knowledge.tool.{tool_call['name']}",
+                        tool_duration,
+                        node_name="gather_knowledge",
+                        iteration=iteration,
+                        data={"loop_iteration": iter_num},
+                    )
                     
                     # Extract structured data from tool results
                     tool_name = tool_call["name"]
@@ -1157,11 +1564,36 @@ async def gather_knowledge(
                         ))
                     
                 except Exception as e:
+                    tool_duration = _elapsed_seconds(tool_start)
                     messages.append(ToolMessage(
                         content=f"Error: {str(e)}",
                         name=tool_call["name"],
                         tool_call_id=tool_call["id"]
                     ))
+                    iter_tools.append(
+                        {
+                            "tool": tool_call["name"],
+                            "duration_seconds": tool_duration,
+                            "success": False,
+                            "error": str(e)[:300],
+                        }
+                    )
+                    trace_performance_metric(
+                        f"gather_knowledge.tool.{tool_call['name']}",
+                        tool_duration,
+                        node_name="gather_knowledge",
+                        iteration=iteration,
+                        data={"loop_iteration": iter_num, "error": str(e)[:300]},
+                    )
+        loop_timing.append(
+            {
+                "iteration": iter_num,
+                "model_duration_seconds": model_iter_duration,
+                "tool_calls_count": len(response.tool_calls),
+                "tool_timings": iter_tools,
+                "iteration_duration_seconds": _elapsed_seconds(iteration_start),
+            }
+        )
     
     # Build knowledge summary
     raw_summary = "\n\n".join([
@@ -1179,6 +1611,38 @@ async def gather_knowledge(
     # Limit total knowledge summary size
     if len(updated_summary) > 8000:
         updated_summary = updated_summary[:8000] + "\n...(truncated)"
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "gather_knowledge.total",
+        total_duration,
+        node_name="gather_knowledge",
+        iteration=iteration,
+        data={
+            "request": knowledge_request[:300],
+            "iterations_run": len(loop_timing),
+            "papers_added": len(new_papers),
+            "data_sources_added": len(new_data_sources),
+            "loop_timing": loop_timing,
+        },
+    )
+    trace_node_exit(
+        "gather_knowledge",
+        iteration=iteration,
+        success=True,
+        data={
+            "duration_seconds": total_duration,
+            "papers_added": len(new_papers),
+            "data_sources_added": len(new_data_sources),
+        },
+    )
+    logger.info(
+        "Timing gather_knowledge total=%.2fs iterations=%d papers=%d sources=%d",
+        total_duration,
+        len(loop_timing),
+        len(new_papers),
+        len(new_data_sources),
+    )
     
     return Command(
         goto="discovery_supervisor",
@@ -1214,12 +1678,31 @@ async def explore_data(
     """
     from open_deep_research.computational.prompts import data_exploration_prompt
     
+    node_start = perf_counter()
     configurable = ComputationalConfiguration.from_runnable_config(config)
+    iteration = state.get("discovery_iterations", 0)
+    trace_node_enter("explore_data", iteration=iteration)
+    trace_phase_start("explore_data.total", node_name="explore_data", iteration=iteration)
     
     data_source = state.get("_exploration_data_source", "")
     exploration_goal = state.get("_exploration_goal", "")
     
     if not data_source:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "explore_data.total",
+            total_duration,
+            success=False,
+            node_name="explore_data",
+            iteration=iteration,
+            data={"error": "missing_data_source"},
+        )
+        trace_node_exit(
+            "explore_data",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": "missing_data_source"},
+        )
         return Command(
             goto="discovery_supervisor",
             update={
@@ -1278,12 +1761,22 @@ Don't just check one source - cast a wide net to find all relevant data.
         )
     )
     
+    code_gen_duration = 0.0
     try:
+        code_gen_start = perf_counter()
         response = await invoke_model_with_timeout(
             exploration_model,
             [HumanMessage(content=exploration_prompt)],
             timeout=MODEL_INVOKE_TIMEOUT,
             label="explore_data_code_gen"
+        )
+        code_gen_duration = _elapsed_seconds(code_gen_start)
+        trace_performance_metric(
+            "explore_data.code_generation",
+            code_gen_duration,
+            node_name="explore_data",
+            iteration=iteration,
+            data={"model": code_fixer_model},
         )
         
         # Extract code from response
@@ -1309,6 +1802,21 @@ Don't just check one source - cast a wide net to find all relevant data.
         
     except Exception as e:
         logger.error(f"Failed to generate exploration code: {e}")
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "explore_data.total",
+            total_duration,
+            success=False,
+            node_name="explore_data",
+            iteration=iteration,
+            data={"error": str(e)[:500]},
+        )
+        trace_node_exit(
+            "explore_data",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": str(e)[:500]},
+        )
         return Command(
             goto="discovery_supervisor",
             update={
@@ -1321,11 +1829,20 @@ Don't just check one source - cast a wide net to find all relevant data.
     # Execute exploration code in E2B with generous timeout for network queries
     from open_deep_research.computational.code_interpreter import execute_code
     
+    execution_start = perf_counter()
     exploration_result = await execute_code(
         code=exploration_code,
         purpose=f"Data Discovery - {data_source}: {exploration_goal}",
         timeout=180,  # 3 minutes for broad discovery (VizieR searches can take time)
         config=config
+    )
+    execution_duration = _elapsed_seconds(execution_start)
+    trace_performance_metric(
+        "explore_data.code_execution",
+        execution_duration,
+        node_name="explore_data",
+        iteration=iteration,
+        data={"code_length": len(exploration_code), "success": exploration_result.success},
     )
     
     # Format the exploration findings with rich discovery-oriented summary
@@ -1398,6 +1915,39 @@ Don't just check one source - cast a wide net to find all relevant data.
         "code": exploration_code[:3000],  # Store more code for reference
         "stdout_preview": (exploration_result.stdout or "")[:2000],
     })
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "explore_data.total",
+        total_duration,
+        success=exploration_result.success,
+        node_name="explore_data",
+        iteration=iteration,
+        data={
+            "data_source": data_source,
+            "goal": exploration_goal[:300],
+            "code_generation_duration_seconds": code_gen_duration,
+            "execution_duration_seconds": execution_duration,
+            "code_length": len(exploration_code),
+        },
+    )
+    trace_node_exit(
+        "explore_data",
+        iteration=iteration,
+        success=exploration_result.success,
+        data={
+            "duration_seconds": total_duration,
+            "code_generation_duration_seconds": code_gen_duration,
+            "execution_duration_seconds": execution_duration,
+        },
+    )
+    logger.info(
+        "Timing explore_data total=%.2fs code_gen=%.2fs execution=%.2fs success=%s",
+        total_duration,
+        code_gen_duration,
+        execution_duration,
+        exploration_result.success,
+    )
     
     return Command(
         goto="discovery_supervisor",
@@ -1425,8 +1975,12 @@ async def run_experiment(
     3. Executes the code in E2B
     4. Captures all outputs
     """
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
     configurable = ComputationalConfiguration.from_runnable_config(config)
     model_config = get_worker_model_config(configurable, config)
+    trace_node_enter("run_experiment", iteration=iteration)
+    trace_phase_start("run_experiment.total", node_name="run_experiment", iteration=iteration)
     
     hypothesis_text = state.get("_experiment_hypothesis", "").strip()
     experiment_description = state.get("_experiment_description", "").strip()
@@ -1434,6 +1988,21 @@ async def run_experiment(
     # Validate hypothesis is provided
     if not hypothesis_text or len(hypothesis_text) < 10:
         logger.warning(f"Run experiment called without valid hypothesis: '{hypothesis_text}'")
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "run_experiment.total",
+            total_duration,
+            success=False,
+            node_name="run_experiment",
+            iteration=iteration,
+            data={"error": "invalid_hypothesis", "hypothesis_length": len(hypothesis_text)},
+        )
+        trace_node_exit(
+            "run_experiment",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": "invalid_hypothesis"},
+        )
         return Command(
             goto="discovery_supervisor",
             update={
@@ -1479,7 +2048,10 @@ async def run_experiment(
     
     # Try structured output first, fall back to manual parsing for models that don't support it
     experiment_plan = None
+    design_duration = 0.0
+    design_fallback_used = False
     try:
+        design_start = perf_counter()
         experiment_model = (
             configurable_model
             .with_structured_output(ExperimentPlan)
@@ -1492,12 +2064,15 @@ async def run_experiment(
             timeout=MODEL_INVOKE_TIMEOUT,
             label="experiment_design"
         )
+        design_duration = _elapsed_seconds(design_start)
     except Exception as e:
+        design_duration = _elapsed_seconds(design_start)
         error_str = str(e).lower()
         # Check if it's a structured output compatibility issue
         if "response_format" in error_str or "unavailable" in error_str or "json" in error_str:
             logger.warning(f"Structured output not supported, using fallback parser: {e}")
             print(f"Structured output not supported, using fallback parser")
+            design_fallback_used = True
             
             # Use fallback: ask model to output code in a very specific format
             fallback_prompt = f"""{design_prompt}
@@ -1531,11 +2106,21 @@ Remember: The code between ---BEGIN_PYTHON_CODE--- and ---END_PYTHON_CODE--- mus
 pure Python with NO markdown, NO explanations, and MUST be syntactically complete.
 """
             try:
+                fallback_start = perf_counter()
                 fallback_response = await invoke_model_with_timeout(
                     configurable_model.with_config(model_config),
                     [HumanMessage(content=fallback_prompt)],
                     timeout=MODEL_INVOKE_TIMEOUT,
                     label="experiment_design_fallback"
+                )
+                fallback_duration = _elapsed_seconds(fallback_start)
+                design_duration += fallback_duration
+                trace_performance_metric(
+                    "run_experiment.design_fallback_model_invoke",
+                    fallback_duration,
+                    node_name="run_experiment",
+                    iteration=iteration,
+                    data={"model": configurable.research_model},
                 )
                 # Parse the response manually
                 content = fallback_response.content
@@ -1655,6 +2240,21 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
                     
             except Exception as parse_error:
                 logger.error(f"Fallback parsing also failed: {parse_error}")
+                total_duration = _elapsed_seconds(node_start)
+                trace_phase_end(
+                    "run_experiment.total",
+                    total_duration,
+                    success=False,
+                    node_name="run_experiment",
+                    iteration=iteration,
+                    data={"error": str(parse_error)[:500], "phase": "design_fallback"},
+                )
+                trace_node_exit(
+                    "run_experiment",
+                    iteration=iteration,
+                    success=False,
+                    data={"duration_seconds": total_duration, "error": str(parse_error)[:500]},
+                )
                 return Command(
                     goto="discovery_supervisor",
                     update={
@@ -1665,6 +2265,21 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
                 )
         else:
             logger.error(f"Experiment design failed: {e}")
+            total_duration = _elapsed_seconds(node_start)
+            trace_phase_end(
+                "run_experiment.total",
+                total_duration,
+                success=False,
+                node_name="run_experiment",
+                iteration=iteration,
+                data={"error": str(e)[:500], "phase": "design"},
+            )
+            trace_node_exit(
+                "run_experiment",
+                iteration=iteration,
+                success=False,
+                data={"duration_seconds": total_duration, "error": str(e)[:500]},
+            )
             return Command(
                 goto="discovery_supervisor",
                 update={
@@ -1675,6 +2290,21 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
             )
     
     if not experiment_plan:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "run_experiment.total",
+            total_duration,
+            success=False,
+            node_name="run_experiment",
+            iteration=iteration,
+            data={"error": "empty_experiment_plan"},
+        )
+        trace_node_exit(
+            "run_experiment",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": "empty_experiment_plan"},
+        )
         return Command(
             goto="discovery_supervisor",
             update={
@@ -1683,6 +2313,14 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
                 ]
             }
         )
+
+    trace_performance_metric(
+        "run_experiment.design_generation_total",
+        design_duration,
+        node_name="run_experiment",
+        iteration=iteration,
+        data={"fallback_used": design_fallback_used},
+    )
     
     # ==========================================================================
     # SIMULATION DETECTION: Check if code is generating synthetic data
@@ -1771,6 +2409,8 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
     max_fix_attempts = int(os.getenv("MAX_CODE_FIX_ATTEMPTS", "3"))
     computation_result = None
     code_execution_traces = []  # Track all execution attempts
+    execution_attempt_timings: List[Dict[str, Any]] = []
+    fix_model_timings: List[Dict[str, Any]] = []
     
     # Per-experiment wall-clock timeout (prevents single experiments from running forever)
     experiment_wall_timeout = int(os.getenv("EXPERIMENT_WALL_TIMEOUT", "600"))  # 10 min default
@@ -1791,6 +2431,7 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
             break
         
         execution_start_time = datetime.now()
+        execution_start_perf = perf_counter()
         
         # Execute the experiment in E2B with persistent sandbox
         computation_result = await execute_experiment(
@@ -1802,6 +2443,16 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
         )
         
         execution_time = (datetime.now() - execution_start_time).total_seconds()
+        execution_time_perf = _elapsed_seconds(execution_start_perf)
+        execution_attempt_timings.append(
+            {
+                "attempt": attempt + 1,
+                "execution_time_seconds": execution_time,
+                "execution_time_perf_seconds": execution_time_perf,
+                "success": computation_result.success,
+                "outputs_count": len(computation_result.outputs),
+            }
+        )
         
         # ==========================================================================
         # TRACEABILITY: Record code execution attempt
@@ -1906,6 +2557,7 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
                 # USE DEDICATED CODE FIXER MODEL IF CONFIGURED
                 # ==========================================================================
                 code_fixer_model_name = os.getenv("CODE_FIXER_MODEL")
+                fix_start = perf_counter()
                 
                 if code_fixer_model_name:
                     # Use the dedicated code fixer model (e.g., Claude Opus)
@@ -1932,6 +2584,22 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
                         timeout=MODEL_INVOKE_TIMEOUT,
                         label=f"code_fix_attempt_{attempt+2}"
                     )
+                fix_duration = _elapsed_seconds(fix_start)
+                fix_model_name = code_fixer_model_name or configurable.research_model
+                fix_model_timings.append(
+                    {
+                        "attempt": attempt + 2,
+                        "model": fix_model_name,
+                        "duration_seconds": fix_duration,
+                    }
+                )
+                trace_performance_metric(
+                    "run_experiment.code_fix_model_invoke",
+                    fix_duration,
+                    node_name="run_experiment",
+                    iteration=iteration,
+                    data={"attempt": attempt + 2, "model": fix_model_name},
+                )
                 
                 # Extract the fixed code from the response
                 fixed_code = fix_response.content
@@ -2003,10 +2671,12 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
     # ==========================================================================
     # VISION ANALYSIS: Analyze generated images with AI vision
     # ==========================================================================
+    vision_duration = 0.0
     if computation_result.success:
         # Check if vision analysis is enabled
         if os.getenv("VISION_MODEL") or os.getenv("GOOGLE_API_KEY"):
             try:
+                vision_start = perf_counter()
                 # Build context for vision analysis
                 experiment_context = f"""
 Experiment: {experiment_plan.objective}
@@ -2020,6 +2690,14 @@ Description: {experiment_description}
                     hypothesis=hypothesis_text,
                     experiment_context=experiment_context
                 )
+                vision_duration = _elapsed_seconds(vision_start)
+                trace_performance_metric(
+                    "run_experiment.vision_analysis",
+                    vision_duration,
+                    node_name="run_experiment",
+                    iteration=iteration,
+                    data={"images_count": len(computation_result.get_images())},
+                )
                 logger.info("Vision analysis completed for generated images")
                 
             except Exception as vision_error:
@@ -2028,11 +2706,20 @@ Description: {experiment_description}
     # ==========================================================================
     # QUALITY VALIDATION: Check experiment output quality
     # ==========================================================================
+    quality_start = perf_counter()
     quality = validate_experiment_quality(
         computation_result=computation_result,
         require_statistical_results=True,
         require_visualizations=True,
         min_stdout_length=100
+    )
+    quality_duration = _elapsed_seconds(quality_start)
+    trace_performance_metric(
+        "run_experiment.quality_validation",
+        quality_duration,
+        node_name="run_experiment",
+        iteration=iteration,
+        data={"quality_score": quality.get("quality_score", 0)},
     )
     
     # Log quality assessment
@@ -2117,8 +2804,50 @@ Description: {experiment_description}
             "total_attempts": len(code_execution_traces),
             "outputs_generated": len(computation_result.outputs),
             "quality_score": quality.get("quality_score", 0),
+            "design_duration_seconds": design_duration,
+            "vision_duration_seconds": vision_duration,
+            "quality_duration_seconds": quality_duration,
+            "execution_attempts": execution_attempt_timings,
+            "code_fix_timings": fix_model_timings,
         }
     })
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "run_experiment.total",
+        total_duration,
+        success=computation_result.success,
+        node_name="run_experiment",
+        iteration=iteration,
+        data={
+            "hypothesis": hypothesis_text[:300],
+            "design_duration_seconds": design_duration,
+            "vision_duration_seconds": vision_duration,
+            "quality_duration_seconds": quality_duration,
+            "execution_attempts": execution_attempt_timings,
+            "code_fix_timings": fix_model_timings,
+            "outputs_generated": len(computation_result.outputs),
+            "quality_score": quality.get("quality_score", 0),
+        },
+    )
+    trace_node_exit(
+        "run_experiment",
+        iteration=iteration,
+        success=computation_result.success,
+        data={
+            "duration_seconds": total_duration,
+            "attempts": len(code_execution_traces),
+            "outputs_generated": len(computation_result.outputs),
+        },
+    )
+    logger.info(
+        "Timing run_experiment total=%.2fs design=%.2fs quality=%.2fs attempts=%d success=%s",
+        total_duration,
+        design_duration,
+        quality_duration,
+        len(code_execution_traces),
+        computation_result.success,
+    )
     
     return Command(
         goto="analyze_results",
@@ -2148,7 +2877,7 @@ Description: {experiment_description}
 async def analyze_results(
     state: ComputationalDiscoveryState,
     config: RunnableConfig
-) -> Command[Literal["discovery_supervisor"]]:
+) -> Command[Literal["validate_claims", "discovery_supervisor"]]:
     """Analyze experiment results and determine implications.
     
     This node:
@@ -2157,13 +2886,32 @@ async def analyze_results(
     3. Creates findings
     4. Suggests next steps
     """
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
     configurable = ComputationalConfiguration.from_runnable_config(config)
     model_config = get_worker_model_config(configurable, config)
+    trace_node_enter("analyze_results", iteration=iteration)
+    trace_phase_start("analyze_results.total", node_name="analyze_results", iteration=iteration)
     
     experiment = state.get("_current_experiment")
     hypothesis = state.get("_current_hypothesis")
     
     if not experiment or not hypothesis:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "analyze_results.total",
+            total_duration,
+            success=False,
+            node_name="analyze_results",
+            iteration=iteration,
+            data={"error": "missing_experiment_or_hypothesis"},
+        )
+        trace_node_exit(
+            "analyze_results",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": "missing_experiment_or_hypothesis"},
+        )
         return Command(
             goto="discovery_supervisor",
             update={
@@ -2176,6 +2924,21 @@ async def analyze_results(
     # Get computation results
     computation_results = experiment.computation_results
     if not computation_results:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "analyze_results.total",
+            total_duration,
+            success=False,
+            node_name="analyze_results",
+            iteration=iteration,
+            data={"error": "missing_computation_results"},
+        )
+        trace_node_exit(
+            "analyze_results",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": "missing_computation_results"},
+        )
         return Command(
             goto="discovery_supervisor",
             update={
@@ -2273,6 +3036,8 @@ The experiment code contains patterns suggesting SYNTHETIC/SIMULATED data was us
     
     # Try structured output, fall back to manual parsing
     analysis = None
+    analysis_model_duration = 0.0
+    used_fallback = False
     try:
         analysis_model = (
             configurable_model
@@ -2280,16 +3045,19 @@ The experiment code contains patterns suggesting SYNTHETIC/SIMULATED data was us
             .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
             .with_config(model_config)
         )
+        analysis_start = perf_counter()
         analysis = await invoke_model_with_timeout(
             analysis_model,
             [HumanMessage(content=analysis_prompt)],
             timeout=MODEL_INVOKE_TIMEOUT,
             label="analyze_results"
         )
+        analysis_model_duration = _elapsed_seconds(analysis_start)
     except Exception as e:
         error_str = str(e).lower()
         if "response_format" in error_str or "unavailable" in error_str or "json" in error_str or "timeout" in error_str:
             logger.warning(f"Structured output not supported for analysis, using fallback: {e}")
+            used_fallback = True
             
             # Fallback: ask for structured text response
             fallback_prompt = f"""{analysis_prompt}
@@ -2316,11 +3084,21 @@ SHOULD_REFINE_HYPOTHESIS: [YES or NO]
 REFINED_HYPOTHESIS: [If yes above, provide refined hypothesis. If no, write "N/A"]
 """
             try:
+                fallback_start = perf_counter()
                 fallback_response = await invoke_model_with_timeout(
                     configurable_model.with_config(model_config),
                     [HumanMessage(content=fallback_prompt)],
                     timeout=MODEL_INVOKE_TIMEOUT,
                     label="analyze_results_fallback"
+                )
+                fallback_duration = _elapsed_seconds(fallback_start)
+                analysis_model_duration += fallback_duration
+                trace_performance_metric(
+                    "analyze_results.fallback_model_invoke",
+                    fallback_duration,
+                    node_name="analyze_results",
+                    iteration=iteration,
+                    data={"model": configurable.analysis_model or configurable.research_model},
                 )
                 content = fallback_response.content
                 
@@ -2412,6 +3190,21 @@ REFINED_HYPOTHESIS: [If yes above, provide refined hypothesis. If no, write "N/A
                 )
         else:
             logger.error(f"Analysis failed: {e}")
+            total_duration = _elapsed_seconds(node_start)
+            trace_phase_end(
+                "analyze_results.total",
+                total_duration,
+                success=False,
+                node_name="analyze_results",
+                iteration=iteration,
+                data={"error": str(e)[:500]},
+            )
+            trace_node_exit(
+                "analyze_results",
+                iteration=iteration,
+                success=False,
+                data={"duration_seconds": total_duration, "error": str(e)[:500]},
+            )
             return Command(
                 goto="discovery_supervisor",
                 update={
@@ -2422,6 +3215,21 @@ REFINED_HYPOTHESIS: [If yes above, provide refined hypothesis. If no, write "N/A
             )
     
     if not analysis:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "analyze_results.total",
+            total_duration,
+            success=False,
+            node_name="analyze_results",
+            iteration=iteration,
+            data={"error": "analysis_none"},
+        )
+        trace_node_exit(
+            "analyze_results",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": "analysis_none"},
+        )
         return Command(
             goto="discovery_supervisor",
             update={
@@ -2541,27 +3349,334 @@ REFINED_HYPOTHESIS: [If yes above, provide refined hypothesis. If no, write "N/A
             "recommended_next_steps": analysis.recommended_next_steps,
             "finding_statement": analysis.findings_summary[:500],
             "quality_score": quality.get("quality_score", 0) if quality else 0,
+            "analysis_model_duration_seconds": analysis_model_duration,
+            "analysis_fallback_used": used_fallback,
         }
     }
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_performance_metric(
+        "analyze_results.model_invoke_total",
+        analysis_model_duration,
+        node_name="analyze_results",
+        iteration=iteration,
+        data={"fallback_used": used_fallback},
+    )
+    trace_phase_end(
+        "analyze_results.total",
+        total_duration,
+        node_name="analyze_results",
+        iteration=iteration,
+        data={
+            "analysis_model_duration_seconds": analysis_model_duration,
+            "fallback_used": used_fallback,
+            "supports_hypothesis": analysis.supports_hypothesis,
+            "finding_id": finding.id,
+        },
+    )
+    trace_node_exit(
+        "analyze_results",
+        iteration=iteration,
+        success=True,
+        data={
+            "duration_seconds": total_duration,
+            "analysis_model_duration_seconds": analysis_model_duration,
+            "finding_id": finding.id,
+        },
+    )
+    logger.info(
+        "Timing analyze_results total=%.2fs model=%.2fs fallback=%s",
+        total_duration,
+        analysis_model_duration,
+        used_fallback,
+    )
     
     # Extract recommended next steps as new questions for discovery tracking
     new_questions = [step for step in analysis.recommended_next_steps if step]
     
     return Command(
-        goto="discovery_supervisor",
+        goto="validate_claims",
         update={
             "findings": [finding],
             "new_questions": new_questions,
             "supervisor_messages": [
                 HumanMessage(content="\n".join(summary_parts))
             ],
-            # Clear consumed temp fields
+            # Keep current entities for claim validation gate
+            "_current_finding": finding,
+            # Traceability data
+            "trace_events": [analysis_trace],
+        }
+    )
+
+
+async def validate_claims(
+    state: ComputationalDiscoveryState,
+    config: RunnableConfig
+) -> Command[Literal["discovery_supervisor"]]:
+    """Validate analyzed findings before they can be treated as robust claims."""
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    trace_node_enter("validate_claims", iteration=iteration)
+    trace_phase_start("validate_claims.total", node_name="validate_claims", iteration=iteration)
+    finding = state.get("_current_finding")
+    experiment = state.get("_current_experiment")
+    hypothesis = state.get("_current_hypothesis")
+
+    if not finding or not experiment:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "validate_claims.total",
+            total_duration,
+            success=False,
+            node_name="validate_claims",
+            iteration=iteration,
+            data={"error": "missing_finding_or_experiment"},
+        )
+        trace_node_exit(
+            "validate_claims",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "error": "missing_finding_or_experiment"},
+        )
+        return Command(
+            goto="discovery_supervisor",
+            update={
+                "supervisor_messages": [
+                    HumanMessage(content="Claim validation skipped: no current finding/experiment context.")
+                ]
+            }
+        )
+
+    quality_message = state.get("_quality_message", "")
+    contradiction_notes: List[str] = []
+    if "SIMULATION DATA WARNING" in quality_message.upper():
+        contradiction_notes.append("Simulation-based evidence warning detected in experiment quality checks.")
+    if "NOT SUPPORTED" in finding.statement.upper() and finding.is_novel:
+        contradiction_notes.append("Claim flagged as novel while primary conclusion states not supported.")
+
+    has_stats = bool(finding.statistical_evidence)
+    simulation_penalty = bool(contradiction_notes)
+    novelty_confidence = _estimate_novelty_confidence(
+        confidence_level="high" if finding.is_novel else "medium",
+        has_stats=has_stats,
+        has_contradictions=bool(contradiction_notes),
+        simulation_penalty=simulation_penalty,
+    )
+
+    requires_replication = (
+        configurable.require_replication_for_novel_claims
+        and finding.is_novel
+        and novelty_confidence >= configurable.claim_validation_min_novelty_confidence
+    )
+    replication_status = ReplicationStatus.REQUIRED if requires_replication else ReplicationStatus.NOT_REQUIRED
+    replication_reason = "Replication required for high-impact novel claim." if requires_replication else "Replication not required."
+    replication_attempts = 0
+
+    # Bounded replication gate
+    replication_passed = False
+    replication_timings: List[Dict[str, Any]] = []
+    if requires_replication and experiment.code_executed:
+        trace_replication_check(
+            claim_id=finding.id,
+            status="started",
+            details={"experiment_id": experiment.id, "max_attempts": configurable.max_replication_attempts},
+        )
+        primary_signal = experiment.supports_hypothesis
+        for attempt in range(configurable.max_replication_attempts):
+            rep_start = perf_counter()
+            replication_attempts += 1
+            replication_code = _build_replication_code(experiment.code_executed)
+            replication_result = await execute_experiment(
+                experiment_code=replication_code,
+                experiment_id=f"{experiment.id}_rep{attempt+1}",
+                hypothesis=hypothesis.statement if hypothesis else finding.statement,
+                sandbox_id=state.get("sandbox_id"),
+                config=config,
+            )
+            rep_duration = _elapsed_seconds(rep_start)
+            text_blob = f"{replication_result.stdout}\n{replication_result.stderr}"
+            inferred_signal = _extract_boolean_hypothesis_signal(text_blob)
+            consistent_signal = (
+                inferred_signal is None or primary_signal is None or inferred_signal == primary_signal
+            )
+            has_rep_stats = any(
+                token in text_blob.lower() for token in ("p-value", "p =", "confidence", "correlation")
+            )
+            if replication_result.success and consistent_signal and (has_stats or has_rep_stats):
+                replication_passed = True
+                replication_timings.append(
+                    {
+                        "attempt": attempt + 1,
+                        "duration_seconds": rep_duration,
+                        "success": replication_result.success,
+                        "consistent_signal": consistent_signal,
+                        "has_rep_stats": has_rep_stats,
+                    }
+                )
+                trace_performance_metric(
+                    "validate_claims.replication_attempt",
+                    rep_duration,
+                    node_name="validate_claims",
+                    iteration=iteration,
+                    data={"attempt": attempt + 1, "success": replication_result.success},
+                )
+                break
+            replication_timings.append(
+                {
+                    "attempt": attempt + 1,
+                    "duration_seconds": rep_duration,
+                    "success": replication_result.success,
+                    "consistent_signal": consistent_signal,
+                    "has_rep_stats": has_rep_stats,
+                }
+            )
+            trace_performance_metric(
+                "validate_claims.replication_attempt",
+                rep_duration,
+                node_name="validate_claims",
+                iteration=iteration,
+                data={"attempt": attempt + 1, "success": replication_result.success},
+            )
+
+        replication_status = ReplicationStatus.PASSED if replication_passed else ReplicationStatus.FAILED
+        replication_reason = (
+            "Replication run produced consistent support signal and sufficient statistical output."
+            if replication_passed
+            else "Replication run failed or did not reproduce support signal/statistical evidence."
+        )
+        trace_replication_check(
+            claim_id=finding.id,
+            status="completed",
+            details={
+                "attempts": replication_attempts,
+                "passed": replication_passed,
+                "reason": replication_reason,
+            },
+        )
+
+    # Final claim verdict
+    if contradiction_notes:
+        claim_status = ClaimStatus.REJECTED
+        verdict_reason = "; ".join(contradiction_notes)
+    elif requires_replication and not replication_passed:
+        claim_status = ClaimStatus.INCONCLUSIVE
+        verdict_reason = replication_reason
+    elif (
+        novelty_confidence >= configurable.claim_validation_min_novelty_confidence
+        and (not configurable.require_statistical_evidence or has_stats)
+        and (not requires_replication or replication_passed)
+    ):
+        claim_status = ClaimStatus.VALIDATED
+        verdict_reason = "Evidence quality and confidence thresholds satisfied."
+    else:
+        claim_status = ClaimStatus.PROVISIONAL
+        verdict_reason = "Claim is plausible but does not yet meet strict validation thresholds."
+
+    # Keep novelty reserved for validated claims in synthesis layer
+    finding.is_novel = claim_status == ClaimStatus.VALIDATED
+
+    claim_record = ClaimValidationRecord(
+        finding_id=finding.id,
+        claim_text=finding.statement,
+        hypothesis_id=hypothesis.id if hypothesis else None,
+        experiment_ids=[experiment.id],
+        source_urls=_extract_primary_source_urls(state),
+        confidence_level="high" if finding.is_novel else "medium",
+        statistical_evidence=finding.statistical_evidence,
+        contradiction_notes=contradiction_notes,
+        simulation_penalty_applied=simulation_penalty,
+        evidence_summary=finding.significance[:1000] if finding.significance else "",
+        status=claim_status,
+        verdict_reason=verdict_reason,
+        novelty_confidence=novelty_confidence,
+        replication_status=replication_status,
+        replication_reason=replication_reason,
+        replication_attempts=replication_attempts,
+        updated_at=datetime.now(),
+    )
+
+    trace_claim_created(claim_record.id, finding.id, finding.statement)
+    if claim_status == ClaimStatus.VALIDATED:
+        trace_claim_validated(claim_record.id, verdict_reason, novelty_confidence)
+    else:
+        trace_claim_rejected(claim_record.id, verdict_reason, novelty_confidence)
+
+    existing_findings = state.get("findings", [])
+    updated_findings = [
+        finding if getattr(f, "id", None) == finding.id else f
+        for f in existing_findings
+    ]
+
+    validation_summary = (
+        "=== Claim Validation Gate ===\n"
+        f"Claim status: {claim_status.value.upper()}\n"
+        f"Novelty confidence: {novelty_confidence:.2f}\n"
+        f"Replication: {replication_status.value}\n"
+        f"Reason: {verdict_reason}"
+    )
+
+    claim_trace_event = {
+        "event_type": "claim_validation",
+        "timestamp": datetime.now().isoformat(),
+        "title": f"Claim {claim_status.value.title()}",
+        "finding_id": finding.id,
+        "experiment_id": experiment.id,
+        "data": {
+            "claim_id": claim_record.id,
+            "status": claim_status.value,
+            "novelty_confidence": novelty_confidence,
+            "replication_status": replication_status.value,
+            "replication_attempts": replication_attempts,
+            "replication_timings": replication_timings,
+            "reason": verdict_reason,
+        },
+    }
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "validate_claims.total",
+        total_duration,
+        node_name="validate_claims",
+        iteration=iteration,
+        data={
+            "claim_id": claim_record.id,
+            "status": claim_status.value,
+            "replication_attempts": replication_attempts,
+            "replication_timings": replication_timings,
+        },
+        success=claim_status in (ClaimStatus.VALIDATED, ClaimStatus.PROVISIONAL, ClaimStatus.INCONCLUSIVE),
+    )
+    trace_node_exit(
+        "validate_claims",
+        iteration=iteration,
+        success=True,
+        data={
+            "duration_seconds": total_duration,
+            "claim_id": claim_record.id,
+            "status": claim_status.value,
+        },
+    )
+    logger.info(
+        "Timing validate_claims total=%.2fs status=%s replication_attempts=%d",
+        total_duration,
+        claim_status.value,
+        replication_attempts,
+    )
+
+    return Command(
+        goto="discovery_supervisor",
+        update={
+            "findings": {"type": "override", "value": updated_findings},
+            "claim_ledger": [claim_record],
+            "supervisor_messages": [HumanMessage(content=validation_summary)],
+            "trace_events": [claim_trace_event],
+            "_current_finding": None,
             "_current_experiment": None,
             "_current_hypothesis": None,
             "_experiment_quality": {},
             "_quality_message": "",
-            # Traceability data
-            "trace_events": [analysis_trace],
         }
     )
 
@@ -2578,12 +3693,17 @@ async def synthesize_findings(
     IMPORTANT: Will redirect back to supervisor if insufficient experiments
     have been run (requires at least 1 experiment with outputs).
     """
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
     configurable = ComputationalConfiguration.from_runnable_config(config)
+    trace_node_enter("synthesize_findings", iteration=iteration)
+    trace_phase_start("synthesize_findings.total", node_name="synthesize_findings", iteration=iteration)
     # Get all components
     research_brief = state.get("research_brief", "")
     hypotheses = state.get("hypotheses", [])
     experiments = state.get("experiments", [])
     findings = state.get("findings", [])
+    claim_ledger = state.get("claim_ledger", [])
     all_outputs = state.get("all_outputs", {})
     computation_results = state.get("computation_results", [])
     discovery_iterations = state.get("discovery_iterations", 0)
@@ -2609,6 +3729,26 @@ async def synthesize_findings(
             f"Experiments: {len(experiments)}, Outputs: {len(all_outputs)}, "
             f"Computation results: {len(computation_results)}. "
             f"Redirecting to supervisor to run experiments."
+        )
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "synthesize_findings.total",
+            total_duration,
+            success=False,
+            node_name="synthesize_findings",
+            iteration=iteration,
+            data={
+                "insufficient_computation": True,
+                "experiments": len(experiments),
+                "outputs": len(all_outputs),
+                "computation_results": len(computation_results),
+            },
+        )
+        trace_node_exit(
+            "synthesize_findings",
+            iteration=iteration,
+            success=False,
+            data={"duration_seconds": total_duration, "redirected_to_supervisor": True},
         )
         return Command(
             goto="discovery_supervisor",
@@ -2652,10 +3792,13 @@ Use RunExperiment NOW to execute code for your hypothesis.
         for exp in experiments
     ]) if experiments else "No experiments were conducted."
     
-    findings_text = "\n".join([
-        f"- {f.statement}\n  Significance: {f.significance}"
-        for f in findings
-    ]) if findings else "No formal findings recorded."
+    if claim_ledger:
+        findings_text = summarize_claim_ledger(claim_ledger)
+    else:
+        findings_text = "\n".join([
+            f"- {f.statement}\n  Significance: {f.significance}"
+            for f in findings
+        ]) if findings else "No formal findings recorded."
     
     outputs_catalogue = create_outputs_catalogue(state)
     
@@ -2664,6 +3807,7 @@ Use RunExperiment NOW to execute code for your hypothesis.
     for result in state.get("computation_results", []):
         raw_notes_parts.append(result.to_ai_summary())
     raw_notes = "\n\n".join(raw_notes_parts)
+    messages_text = get_buffer_string(state.get("messages", []))
     
     # Generate final report
     report_model = configurable_model.with_config(
@@ -2677,6 +3821,8 @@ Use RunExperiment NOW to execute code for your hypothesis.
     
     synthesis_prompt = final_report_synthesis_prompt.format(
         date=get_today_str(),
+        messages=messages_text[:12000],  # Limit size
+        report_language=configurable.report_language,
         research_brief=research_brief,
         hypotheses=hypotheses_text,
         experiments=experiments_text,
@@ -2685,12 +3831,16 @@ Use RunExperiment NOW to execute code for your hypothesis.
         raw_notes=raw_notes[:30000]  # Limit size
     )
     
+    report_generation_duration = 0.0
     try:
+        report_start = perf_counter()
         response = await report_model.ainvoke([
             HumanMessage(content=synthesis_prompt)
         ])
+        report_generation_duration = _elapsed_seconds(report_start)
         final_report = response.content
     except Exception as e:
+        report_generation_duration = _elapsed_seconds(report_start)
         logger.error(f"Report synthesis failed: {e}")
         final_report = f"""
 # Research Report
@@ -2731,6 +3881,10 @@ An error occurred during report synthesis: {str(e)}
         except:
             pass
     
+    # Access current timing summary before creating the final state event
+    trace = TraceManager.get_trace()
+    timing_breakdown = trace.get_timing_breakdown() if trace else {}
+
     # Create final trace event
     final_trace_event = {
         "event_type": "report_generated",
@@ -2744,6 +3898,8 @@ An error occurred during report synthesis: {str(e)}
             "total_outputs": len(all_outputs),
             "total_duration_seconds": total_duration,
             "total_iterations": discovery_iterations,
+            "report_generation_duration_seconds": report_generation_duration,
+            "timing_breakdown_top": list(timing_breakdown.items())[:15],
         },
         "success": True
     }
@@ -2758,8 +3914,44 @@ An error occurred during report synthesis: {str(e)}
             "total_hypotheses": len(hypotheses),
             "total_experiments": len(experiments),
             "total_findings": len(findings),
+            "report_generation_duration_seconds": report_generation_duration,
+            "timing_breakdown_top": list(timing_breakdown.items())[:15],
         },
         success=True
+    )
+    trace_performance_metric(
+        "synthesize_findings.report_generation",
+        report_generation_duration,
+        node_name="synthesize_findings",
+        iteration=iteration,
+        data={"model": configurable.final_report_model},
+    )
+    total_duration_node = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "synthesize_findings.total",
+        total_duration_node,
+        node_name="synthesize_findings",
+        iteration=iteration,
+        data={
+            "report_generation_duration_seconds": report_generation_duration,
+            "report_length": len(final_report),
+            "timing_breakdown_top": list(timing_breakdown.items())[:15],
+        },
+    )
+    trace_node_exit(
+        "synthesize_findings",
+        iteration=iteration,
+        success=True,
+        data={
+            "duration_seconds": total_duration_node,
+            "report_generation_duration_seconds": report_generation_duration,
+            "report_length": len(final_report),
+        },
+    )
+    logger.info(
+        "Timing synthesize_findings total=%.2fs report_generation=%.2fs",
+        total_duration_node,
+        report_generation_duration,
     )
     TraceManager.finalize(final_report)
     

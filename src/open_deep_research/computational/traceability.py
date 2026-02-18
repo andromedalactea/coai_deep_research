@@ -41,6 +41,9 @@ class TraceEventType(str, Enum):
     # Node execution events
     NODE_ENTER = "node_enter"
     NODE_EXIT = "node_exit"
+    PHASE_START = "phase_start"
+    PHASE_END = "phase_end"
+    PERFORMANCE_METRIC = "performance_metric"
     
     # Supervisor decision events
     SUPERVISOR_DECISION = "supervisor_decision"
@@ -83,6 +86,13 @@ class TraceEventType(str, Enum):
     ANALYSIS_START = "analysis_start"
     ANALYSIS_RESULT = "analysis_result"
     FINDING_RECORDED = "finding_recorded"
+
+    # Claim validation / replication events
+    CLAIM_CREATED = "claim_created"
+    CLAIM_VALIDATED = "claim_validated"
+    CLAIM_REJECTED = "claim_rejected"
+    REPLICATION_STARTED = "replication_started"
+    REPLICATION_COMPLETED = "replication_completed"
     
     # Report events
     REPORT_GENERATION_START = "report_generation_start"
@@ -402,6 +412,23 @@ class ResearchTrace(BaseModel):
     
     # Final results
     final_report: str = ""
+
+    def get_timing_breakdown(self) -> Dict[str, float]:
+        """Aggregate elapsed durations by phase/node from event timeline."""
+        phase_totals: Dict[str, float] = {}
+        for event in self.events:
+            if event.duration_seconds is None:
+                continue
+            phase_name = (
+                event.data.get("phase_name")
+                or event.data.get("metric_name")
+                or event.node_name
+                or event.title
+            )
+            if not phase_name:
+                continue
+            phase_totals[phase_name] = phase_totals.get(phase_name, 0.0) + float(event.duration_seconds)
+        return dict(sorted(phase_totals.items(), key=lambda item: item[1], reverse=True))
     
     def add_event(
         self,
@@ -495,6 +522,7 @@ class ResearchTrace(BaseModel):
                 "total_hypotheses": self.total_hypotheses,
                 "total_experiments": self.total_experiments,
                 "total_findings": self.total_findings,
+                "timing_breakdown_seconds": self.get_timing_breakdown(),
             },
             "final_report": self.final_report,
         }
@@ -539,6 +567,21 @@ class ResearchTrace(BaseModel):
             f"| Total Experiments | {self.total_experiments} |",
             f"| Total Findings | {self.total_findings} |",
             "",
+        ])
+
+        timing_breakdown = self.get_timing_breakdown()
+        if timing_breakdown:
+            lines.extend([
+                "### Timing Breakdown (Top Phases)",
+                "",
+                "| Phase | Duration (s) |",
+                "|-------|--------------|",
+            ])
+            for phase_name, elapsed in list(timing_breakdown.items())[:25]:
+                lines.append(f"| {phase_name} | {elapsed:.2f} |")
+            lines.append("")
+
+        lines.extend([
             "---",
             "",
             "## Research Query",
@@ -956,6 +999,64 @@ def trace_node_exit(node_name: str, iteration: int = None, success: bool = True,
     )
 
 
+def trace_phase_start(
+    phase_name: str,
+    node_name: str = None,
+    iteration: int = None,
+    data: Dict[str, Any] = None,
+):
+    """Record the start of a timed phase."""
+    TraceManager.add_event(
+        event_type=TraceEventType.PHASE_START,
+        title=f"Phase Started: {phase_name}",
+        description=f"Started phase '{phase_name}'",
+        node_name=node_name,
+        iteration=iteration,
+        data={"phase_name": phase_name, **(data or {})},
+    )
+
+
+def trace_phase_end(
+    phase_name: str,
+    duration_seconds: float,
+    success: bool = True,
+    node_name: str = None,
+    iteration: int = None,
+    data: Dict[str, Any] = None,
+):
+    """Record the end of a timed phase."""
+    TraceManager.add_event(
+        event_type=TraceEventType.PHASE_END,
+        title=f"Phase Completed: {phase_name}",
+        description=f"Completed phase '{phase_name}' in {duration_seconds:.2f}s",
+        node_name=node_name,
+        iteration=iteration,
+        duration_seconds=duration_seconds,
+        success=success,
+        data={"phase_name": phase_name, **(data or {})},
+    )
+
+
+def trace_performance_metric(
+    metric_name: str,
+    duration_seconds: float,
+    node_name: str = None,
+    iteration: int = None,
+    data: Dict[str, Any] = None,
+):
+    """Record granular performance metrics for profiling."""
+    TraceManager.add_event(
+        event_type=TraceEventType.PERFORMANCE_METRIC,
+        title=f"Performance Metric: {metric_name}",
+        description=f"{metric_name} took {duration_seconds:.2f}s",
+        node_name=node_name,
+        iteration=iteration,
+        duration_seconds=duration_seconds,
+        success=True,
+        data={"metric_name": metric_name, **(data or {})},
+    )
+
+
 def trace_code_execution(
     code: str,
     purpose: str,
@@ -1099,6 +1200,53 @@ def trace_finding_recorded(finding_id: str, statement: str, is_novel: bool = Fal
     )
 
 
+def trace_claim_created(claim_id: str, finding_id: str, claim_text: str):
+    """Record claim creation for the evidence ledger."""
+    TraceManager.add_event(
+        event_type=TraceEventType.CLAIM_CREATED,
+        title=f"Claim Created: {claim_text[:80]}...",
+        data={"claim_id": claim_id, "finding_id": finding_id, "claim_text": claim_text[:500]}
+    )
+
+
+def trace_claim_validated(claim_id: str, reason: str, novelty_confidence: float):
+    """Record claim validation success."""
+    TraceManager.add_event(
+        event_type=TraceEventType.CLAIM_VALIDATED,
+        title=f"Claim Validated: {claim_id}",
+        description=reason,
+        data={"claim_id": claim_id, "novelty_confidence": novelty_confidence},
+        success=True,
+    )
+
+
+def trace_claim_rejected(claim_id: str, reason: str, novelty_confidence: float):
+    """Record claim rejection/inconclusive outcome."""
+    TraceManager.add_event(
+        event_type=TraceEventType.CLAIM_REJECTED,
+        title=f"Claim Rejected: {claim_id}",
+        description=reason,
+        data={"claim_id": claim_id, "novelty_confidence": novelty_confidence},
+        success=False,
+    )
+
+
+def trace_replication_check(claim_id: str, status: str, details: Dict[str, Any]):
+    """Record replication lifecycle events for a claim."""
+    event_type = (
+        TraceEventType.REPLICATION_STARTED
+        if status == "started"
+        else TraceEventType.REPLICATION_COMPLETED
+    )
+    success = details.get("passed") if status != "started" else None
+    TraceManager.add_event(
+        event_type=event_type,
+        title=f"Replication {status.title()}: {claim_id}",
+        data={"claim_id": claim_id, **details},
+        success=success,
+    )
+
+
 def trace_output_generated(output_id: str, output_type: str, description: str = ""):
     """Record output generation."""
     trace = TraceManager.get_trace()
@@ -1174,11 +1322,18 @@ __all__ = [
     "TraceManager",
     "trace_node_enter",
     "trace_node_exit",
+    "trace_phase_start",
+    "trace_phase_end",
+    "trace_performance_metric",
     "trace_code_execution",
     "trace_supervisor_decision",
     "trace_hypothesis_created",
     "trace_experiment_started",
     "trace_finding_recorded",
+    "trace_claim_created",
+    "trace_claim_validated",
+    "trace_claim_rejected",
+    "trace_replication_check",
     "trace_output_generated",
     "trace_web_retrieval",
 ]

@@ -41,3 +41,6 @@ Next Experiments: Concrete follow-up steps, identifying specific upcoming data r
 
 Important Note on Integrity:
 Scientific honesty is paramount. Distinguish between "Search Error" and "Absence of Evidence." If your computational scrutiny—grounded in real-world data—finds no significant biosignature, you must conclude a negative result and explain the failure modes of the abiotic/biotic models tested.
+
+
+Please use the sarch internet tools carefully massibly to get ideas by the literature and don't generate it just by yourself

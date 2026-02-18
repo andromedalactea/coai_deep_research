@@ -24,6 +24,9 @@ from open_deep_research.computational.state import (
     ComputationalDiscoveryInputState,
     HypothesisRecord,
     HypothesisStatus,
+    ClaimStatus,
+    ReplicationStatus,
+    ClaimValidationRecord,
     ExperimentRecord,
     ExperimentStatus,
     ExperimentDesign,
@@ -87,6 +90,9 @@ from open_deep_research.computational.traceability import (
     SupervisorDecisionTrace,
     ResearchTrace,
     TraceManager,
+    trace_phase_start,
+    trace_phase_end,
+    trace_performance_metric,
 )
 
 __all__ = [
@@ -101,6 +107,9 @@ __all__ = [
     "ComputationalDiscoveryInputState",
     "HypothesisRecord",
     "HypothesisStatus",
+    "ClaimStatus",
+    "ReplicationStatus",
+    "ClaimValidationRecord",
     "ExperimentRecord",
     "ExperimentStatus", 
     "ExperimentDesign",
@@ -153,4 +162,7 @@ __all__ = [
     "SupervisorDecisionTrace",
     "ResearchTrace",
     "TraceManager",
+    "trace_phase_start",
+    "trace_phase_end",
+    "trace_performance_metric",
 ]

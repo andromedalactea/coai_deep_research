@@ -256,6 +256,8 @@ For more context, here is all of the messages so far. Focus on the research brie
 CRITICAL: Make sure the answer is written in the same language as the human messages!
 For example, if the user's messages are in English, then MAKE SURE you write your response in English. If the user's messages are in Chinese, then MAKE SURE you write your entire response in Chinese.
 This is critical. The user will only understand the answer if it is written in the same language as their input message.
+Configured default output language: {report_language}
+If there is no clear language signal in the human messages, use the configured default output language.
 
 Today's date is {date}.
 

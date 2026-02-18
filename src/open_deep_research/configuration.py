@@ -250,6 +250,16 @@ class Configuration(BaseModel):
             }
         }
     )
+    report_language: str = Field(
+        default="English",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "English",
+                "description": "Preferred language for final reports (for example: English, Spanish, Portuguese)."
+            }
+        }
+    )
     # Enhanced Retrieval Configuration
     retrieval_mode: str = Field(
         default="exploratory",

@@ -35,6 +35,23 @@ class HypothesisStatus(str, Enum):
     REFINED = "refined"
 
 
+class ClaimStatus(str, Enum):
+    """Validation lifecycle status for a scientific claim."""
+    PROVISIONAL = "provisional"
+    VALIDATED = "validated"
+    REJECTED = "rejected"
+    INCONCLUSIVE = "inconclusive"
+
+
+class ReplicationStatus(str, Enum):
+    """Status for claim replication checks."""
+    NOT_REQUIRED = "not_required"
+    REQUIRED = "required"
+    PASSED = "passed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 class ExperimentStatus(str, Enum):
     """Status of a computational experiment."""
     DESIGNED = "designed"
@@ -414,6 +431,39 @@ class Finding(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+class ClaimValidationRecord(BaseModel):
+    """Evidence ledger entry tying a finding to validation outcomes."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    finding_id: str = Field(description="Finding associated with this claim.")
+    claim_text: str = Field(description="Claim statement under validation.")
+
+    # Linkage for provenance and reproducibility
+    hypothesis_id: Optional[str] = None
+    experiment_ids: List[str] = Field(default_factory=list)
+    source_urls: List[str] = Field(default_factory=list)
+
+    # Evidence and quality signals
+    confidence_level: str = "low"
+    statistical_evidence: Optional[str] = None
+    contradiction_notes: List[str] = Field(default_factory=list)
+    simulation_penalty_applied: bool = False
+    evidence_summary: str = ""
+
+    # Validation lifecycle
+    status: ClaimStatus = ClaimStatus.PROVISIONAL
+    verdict_reason: str = ""
+    novelty_confidence: float = 0.0
+
+    # Replication
+    replication_status: ReplicationStatus = ReplicationStatus.NOT_REQUIRED
+    replication_reason: str = ""
+    replication_attempts: int = 0
+
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
 # =============================================================================
 # Reducers for State Management
 # =============================================================================
@@ -488,6 +538,7 @@ class ComputationalDiscoveryState(MessagesState):
     
     # Discovery tracking
     findings: Annotated[List[Finding], override_or_append_reducer] = []
+    claim_ledger: Annotated[List[ClaimValidationRecord], override_or_append_reducer] = []
     new_questions: Annotated[List[str], override_or_append_reducer] = []
     
     # Iteration control
@@ -511,6 +562,7 @@ class ComputationalDiscoveryState(MessagesState):
     # Current experiment/hypothesis being processed (passed between nodes)
     _current_experiment: Optional["ExperimentRecord"] = None
     _current_hypothesis: Optional["HypothesisRecord"] = None
+    _current_finding: Optional["Finding"] = None
     
     # Experiment quality tracking (populated by run_experiment)
     _experiment_quality: Dict[str, Any] = {}  # Quality validation results

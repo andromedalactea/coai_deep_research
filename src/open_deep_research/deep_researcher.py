@@ -670,6 +670,7 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 research_brief=state.get("research_brief", ""),
                 messages=get_buffer_string(state.get("messages", [])),
                 findings=findings,
+                report_language=configurable.report_language,
                 date=get_today_str()
             )
             

@@ -1036,6 +1036,48 @@ Provide your analysis:
 """
 
 
+claim_validation_prompt = """
+You are a strict scientific claim validator.
+
+Today's date is {date}.
+
+<Claim>
+{claim_text}
+</Claim>
+
+<Evidence Summary>
+{evidence_summary}
+</Evidence Summary>
+
+<Statistical Evidence>
+{statistical_evidence}
+</Statistical Evidence>
+
+<Known Contradiction Notes>
+{contradiction_notes}
+</Known Contradiction Notes>
+
+<Replication Context>
+{replication_context}
+</Replication Context>
+
+Task:
+1. Decide whether the claim should be VALIDATED, REJECTED, or left INCONCLUSIVE.
+2. Provide a novelty confidence score in [0, 1].
+3. Explain the verdict with concise, evidence-linked reasoning.
+4. State whether replication should be required before validation.
+
+Output format:
+{
+  "status": "validated|rejected|inconclusive",
+  "novelty_confidence": 0.0,
+  "reason": "short evidence-based rationale",
+  "requires_replication": true/false,
+  "contradictions": ["optional contradiction note"]
+}
+"""
+
+
 output_interpretation_prompt = """
 You are analyzing computational outputs to extract scientific insights.
 
@@ -1128,6 +1170,16 @@ You are synthesizing the findings from a computational scientific discovery proc
 
 Today's date is {date}.
 
+<Conversation Messages>
+{messages}
+</Conversation Messages>
+
+<Output Language Requirement>
+- Write the FULL report in: {report_language}
+- Do not switch languages mid-report.
+- If the user explicitly requested a different output language in the conversation or research brief, follow that explicit request.
+</Output Language Requirement>
+
 <Original Research Brief>
 {research_brief}
 </Original Research Brief>
@@ -1159,6 +1211,11 @@ IMPORTANT: Extract and include specific numerical values, statistical test resul
 =============================================================================
 CRITICAL REQUIREMENTS - YOUR REPORT MUST INCLUDE:
 =============================================================================
+
+0. **LANGUAGE COMPLIANCE** - The report language is mandatory:
+   - Use the required output language for all sections, captions, and table text.
+   - Do not translate figure filenames; keep filenames exactly as provided (for example: output_abc123.png).
+   - Do not mix Chinese, English, or any other language unless the user explicitly requested bilingual output.
 
 1. **ALL FIGURES** - You MUST embed every figure from the outputs catalogue using:
    ![Descriptive Caption](output_<id>.png)

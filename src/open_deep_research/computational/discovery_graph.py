@@ -25,6 +25,7 @@ from open_deep_research.computational.discovery_nodes import (
     run_experiment,
     supervisor_tools,
     synthesize_findings,
+    validate_claims,
 )
 from open_deep_research.computational.state import (
     ComputationalDiscoveryInputState,
@@ -105,6 +106,7 @@ def build_computational_discovery_graph():
     discovery_builder.add_node("explore_data", explore_data)  # Schema discovery before experiments
     discovery_builder.add_node("run_experiment", run_experiment)
     discovery_builder.add_node("analyze_results", analyze_results)
+    discovery_builder.add_node("validate_claims", validate_claims)
     discovery_builder.add_node("synthesize_findings", synthesize_findings)
     
     # Define edges
@@ -119,7 +121,8 @@ def build_computational_discovery_graph():
     # - gather_knowledge → discovery_supervisor
     # - explore_data → discovery_supervisor (returns schema discovery findings)
     # - run_experiment → analyze_results
-    # - analyze_results → discovery_supervisor
+    # - analyze_results → validate_claims
+    # - validate_claims → discovery_supervisor
     # - synthesize_findings → END OR discovery_supervisor (if insufficient experiments)
     
     # Note: No static edges needed - all routing done via Command returns
