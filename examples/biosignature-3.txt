@@ -43,4 +43,6 @@ Important Note on Integrity:
 Scientific honesty is paramount. Distinguish between "Search Error" and "Absence of Evidence." If your computational scrutiny—grounded in real-world data—finds no significant biosignature, you must conclude a negative result and explain the failure modes of the abiotic/biotic models tested.
 
 
-Please use the sarch internet tools carefully massibly to get ideas by the literature and don't generate it just by yourself
+Please use the sarch internet tools carefully massibly to get ideas by the literature and don't generate it just by yourself.
+
+Please reallly7 base your research in the current literature you can take ideas from there and try to check by yourself with the curretn hailities your system have to run code or conect to astronomical data

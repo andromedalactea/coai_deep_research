@@ -66,11 +66,15 @@ For research requiring **numerical simulations, data analysis, and computational
 ### Key Capabilities
 
 - 🔬 **Hypothesis Generation & Testing**: Automatically generate and test scientific hypotheses
+- 🧠 **Hypothesis Reflection Loop**: Multi-round self-critique/refinement before execution
+- 📚 **Novelty Engine**: Multi-round prior-art checks (Semantic Scholar/OpenAlex) with novelty gating
 - 💻 **Code Execution**: Run Python simulations in secure E2B sandboxes
 - 📊 **Data Visualization**: Generate publication-quality figures automatically
 - 🗄️ **Scientific Databases**: Query NASA archives, ArXiv, SDSS, MAST
 - 📈 **Statistical Analysis**: Perform rigorous hypothesis testing with p-values and confidence intervals
 - 🔄 **Iterative Discovery**: Refine hypotheses based on computational results
+- 🧩 **Experiment Packs**: Reusable domain packs with required outputs/metrics and planning hints
+- 📝 **Paper Pipeline**: Draft + automated review pass with trace-linked output
 - 📝 **Comprehensive Reports**: Produce research reports with embedded figures and statistical evidence
 
 ### Quick Start

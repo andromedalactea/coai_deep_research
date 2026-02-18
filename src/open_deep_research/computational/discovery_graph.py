@@ -17,14 +17,18 @@ from langgraph.graph import END, START, StateGraph
 
 from open_deep_research.computational.discovery_nodes import (
     analyze_results,
+    check_novelty,
     clarify_discovery_query,
     discovery_supervisor,
     explore_data,
     gather_knowledge,
     generate_research_brief,
+    reflect_hypothesis,
+    review_paper_draft,
     run_experiment,
     supervisor_tools,
     synthesize_findings,
+    write_paper_draft,
     validate_claims,
 )
 from open_deep_research.computational.state import (
@@ -104,10 +108,14 @@ def build_computational_discovery_graph():
     discovery_builder.add_node("supervisor_tools", supervisor_tools)
     discovery_builder.add_node("gather_knowledge", gather_knowledge)
     discovery_builder.add_node("explore_data", explore_data)  # Schema discovery before experiments
+    discovery_builder.add_node("check_novelty", check_novelty)
+    discovery_builder.add_node("reflect_hypothesis", reflect_hypothesis)
     discovery_builder.add_node("run_experiment", run_experiment)
     discovery_builder.add_node("analyze_results", analyze_results)
     discovery_builder.add_node("validate_claims", validate_claims)
     discovery_builder.add_node("synthesize_findings", synthesize_findings)
+    discovery_builder.add_node("write_paper_draft", write_paper_draft)
+    discovery_builder.add_node("review_paper_draft", review_paper_draft)
     
     # Define edges
     # Entry point - start with clarification
@@ -117,13 +125,17 @@ def build_computational_discovery_graph():
     # - clarify_discovery_query → generate_research_brief OR END
     # - generate_research_brief → discovery_supervisor
     # - discovery_supervisor → supervisor_tools
-    # - supervisor_tools → discovery_supervisor OR gather_knowledge OR explore_data OR run_experiment OR synthesize_findings
+    # - supervisor_tools → discovery_supervisor OR gather_knowledge OR explore_data OR check_novelty OR reflect_hypothesis OR run_experiment OR synthesize_findings
+    # - check_novelty → discovery_supervisor
+    # - reflect_hypothesis → run_experiment OR discovery_supervisor
     # - gather_knowledge → discovery_supervisor
     # - explore_data → discovery_supervisor (returns schema discovery findings)
     # - run_experiment → analyze_results
     # - analyze_results → validate_claims
     # - validate_claims → discovery_supervisor
-    # - synthesize_findings → END OR discovery_supervisor (if insufficient experiments)
+    # - synthesize_findings → END OR discovery_supervisor OR write_paper_draft
+    # - write_paper_draft → review_paper_draft
+    # - review_paper_draft → END
     
     # Note: No static edges needed - all routing done via Command returns
     # synthesize_findings can now redirect back to supervisor if not enough

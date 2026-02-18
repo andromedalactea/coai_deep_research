@@ -36,6 +36,245 @@ class ComputationalConfiguration(BaseConfiguration):
     """
     
     # ==========================================================================
+    # Novelty Engine Settings
+    # ==========================================================================
+
+    enable_novelty_engine: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable multi-round prior-art novelty checks before validating high-impact claims."
+            }
+        }
+    )
+
+    novelty_engine: str = Field(
+        default="semantic_scholar",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "select",
+                "default": "semantic_scholar",
+                "description": "Primary literature search engine for novelty checks.",
+                "options": [
+                    {"label": "Semantic Scholar", "value": "semantic_scholar"},
+                    {"label": "OpenAlex", "value": "openalex"},
+                ]
+            }
+        }
+    )
+
+    novelty_max_rounds: int = Field(
+        default=4,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 4,
+                "min": 1,
+                "max": 10,
+                "step": 1,
+                "description": "Maximum query-reflection rounds for novelty checks."
+            }
+        }
+    )
+
+    novelty_min_confidence_to_block: float = Field(
+        default=0.75,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 0.75,
+                "min": 0.0,
+                "max": 1.0,
+                "description": "If non-novel confidence meets this threshold, block claim validation as novel."
+            }
+        }
+    )
+
+    novelty_model: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Optional dedicated model for novelty checks. Falls back to worker/research model."
+            }
+        }
+    )
+
+    # ==========================================================================
+    # Reflection Loop Settings
+    # ==========================================================================
+
+    enable_hypothesis_reflection: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable iterative hypothesis reflection/refinement before experiment execution."
+            }
+        }
+    )
+
+    reflection_max_rounds: int = Field(
+        default=3,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 3,
+                "min": 1,
+                "max": 8,
+                "step": 1,
+                "description": "Maximum reflection rounds for each hypothesis."
+            }
+        }
+    )
+
+    reflection_done_keyword: str = Field(
+        default="I AM DONE",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "I AM DONE",
+                "description": "Keyword used by reflection model to indicate convergence."
+            }
+        }
+    )
+
+    reflection_model: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Optional dedicated model for hypothesis reflection."
+            }
+        }
+    )
+
+    # ==========================================================================
+    # Experiment Orchestrator Settings
+    # ==========================================================================
+
+    orchestrator_max_runs: int = Field(
+        default=3,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 3,
+                "min": 1,
+                "max": 8,
+                "step": 1,
+                "description": "Maximum planned runs per orchestrated experiment cycle."
+            }
+        }
+    )
+
+    orchestrator_max_fix_attempts: int = Field(
+        default=2,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 2,
+                "min": 0,
+                "max": 6,
+                "step": 1,
+                "description": "Maximum fix/retry attempts when experiment code fails."
+            }
+        }
+    )
+
+    orchestrator_require_explicit_completion: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Require explicit completion criteria to stop run orchestration."
+            }
+        }
+    )
+
+    # ==========================================================================
+    # Paper Pipeline Settings
+    # ==========================================================================
+
+    enable_paper_pipeline: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Generate a structured paper draft and perform an automated review pass."
+            }
+        }
+    )
+
+    writeup_model: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Optional dedicated model for draft writing."
+            }
+        }
+    )
+
+    review_model: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Optional dedicated model for paper reviews."
+            }
+        }
+    )
+
+    review_reflection_rounds: int = Field(
+        default=2,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "slider",
+                "default": 2,
+                "min": 1,
+                "max": 5,
+                "step": 1,
+                "description": "Number of review improvement loops over generated draft."
+            }
+        }
+    )
+
+    # ==========================================================================
+    # Experiment Pack Settings
+    # ==========================================================================
+
+    experiment_pack_id: str = Field(
+        default="astronomy_default",
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "astronomy_default",
+                "description": "Experiment pack profile to guide orchestration (domain heuristics, metrics, checks)."
+            }
+        }
+    )
+
+    enforce_experiment_pack_contract: bool = Field(
+        default=False,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": False,
+                "description": "If enabled, planner must satisfy pack-required metrics and outputs."
+            }
+        }
+    )
+
+    # ==========================================================================
     # E2B Code Interpreter Settings
     # ==========================================================================
     

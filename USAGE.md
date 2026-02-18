@@ -267,6 +267,27 @@ Optional:
 
 ---
 
+## New Big-Bang Integration Features
+
+The computational graph now includes AI-Scientist-inspired capabilities with graph-native controls:
+
+- **Novelty engine**: bounded multi-round prior-art checks before strong novelty validation.
+- **Hypothesis reflection**: iterative refinement loop before experiment execution.
+- **Experiment orchestration plan**: explicit run-plan metadata, retry limits, and completion criteria.
+- **Experiment packs**: domain pack contract (`experiment_pack_id`) with required outputs and planning hints.
+- **Paper pipeline**: draft generation and review pass appended to final output state.
+- **Phase model routing**: optional dedicated models per phase with fallback via `fallback_fast_model`.
+
+Relevant config keys include:
+- `enable_novelty_engine`, `novelty_engine`, `novelty_max_rounds`
+- `enable_hypothesis_reflection`, `reflection_max_rounds`
+- `orchestrator_max_runs`, `orchestrator_max_fix_attempts`
+- `enable_paper_pipeline`, `writeup_model`, `review_model`
+- `experiment_pack_id`, `enforce_experiment_pack_contract`
+- `enable_phase_model_routing`, `fallback_fast_model`
+
+---
+
 ## Troubleshooting
 
 ### "Using wrong model"

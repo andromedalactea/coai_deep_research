@@ -66,11 +66,16 @@ from open_deep_research.computational.prompts import (
     experiment_design_prompt,
     final_report_synthesis_prompt,
     hypothesis_generation_prompt,
+    hypothesis_reflection_prompt,
     iteration_decision_prompt,
     knowledge_gathering_prompt,
+    paper_draft_prompt,
+    paper_review_prompt,
     research_brief_generation_prompt,
     result_analysis_prompt,
 )
+from open_deep_research.computational.novelty_engine import assess_novelty
+from open_deep_research.computational.experiment_packs import get_experiment_pack
 from open_deep_research.computational.scientific_tools import (
     get_scientific_tools,
     search_arxiv_papers,
@@ -87,12 +92,17 @@ from open_deep_research.computational.state import (
     ClaimValidationRecord,
     ClaimStatus,
     ReplicationStatus,
+    ExperimentRunPlan,
     Finding,
     GeneratedHypothesis,
+    HypothesisReflectionRecord,
     HypothesisRecord,
     HypothesisStatus,
     IterationDecision,
+    NoveltyCheckRecord,
     OutputType,
+    PaperDraftRecord,
+    PaperReviewRecord,
     PaperData,
     ScientificDataSource,
     DataSourceType,
@@ -144,6 +154,38 @@ def get_worker_model_config(configurable: ComputationalConfiguration, config: Ru
     )
 
 
+def get_phase_model_config(
+    configurable: ComputationalConfiguration,
+    config: RunnableConfig,
+    phase: str,
+) -> Dict[str, Any]:
+    """Resolve model runtime config for specialized discovery phases."""
+    if not configurable.enable_phase_model_routing:
+        model_name = configurable.research_model
+        max_tokens = configurable.research_model_max_tokens
+        return get_model_runtime_config(
+            model_name,
+            config,
+            max_tokens=max_tokens,
+            tags=["langsmith:nostream", f"phase:{phase}"],
+        )
+
+    phase_to_model = {
+        "novelty": configurable.novelty_model,
+        "reflection": configurable.reflection_model,
+        "writeup": configurable.writeup_model,
+        "review": configurable.review_model,
+    }
+    model_name = phase_to_model.get(phase) or configurable.worker_model or configurable.research_model
+    max_tokens = configurable.worker_model_max_tokens or configurable.research_model_max_tokens
+    return get_model_runtime_config(
+        model_name,
+        config,
+        max_tokens=max_tokens,
+        tags=["langsmith:nostream", f"phase:{phase}"],
+    )
+
+
 def escape_format_braces(text: str) -> str:
     """Escape curly braces in text to prevent KeyErrors during string formatting.
     
@@ -154,6 +196,49 @@ def escape_format_braces(text: str) -> str:
     if not text:
         return text
     return text.replace("{", "{{").replace("}", "}}")
+
+
+def _parse_json_from_response(text: str) -> Dict[str, Any]:
+    """Parse first JSON object embedded in model output."""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _safe_float(value: Any, fallback: Optional[float] = None) -> Optional[float]:
+    """Safely coerce value to float."""
+    try:
+        if value is None:
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _is_transient_external_error(error_message: Optional[str]) -> bool:
+    """Heuristic detection for transient API/network failures."""
+    if not error_message:
+        return False
+    text = str(error_message).lower()
+    transient_markers = [
+        "incomplete chunked read",
+        "peer closed connection",
+        "connection reset",
+        "read timed out",
+        "temporarily unavailable",
+        "max retries exceeded",
+        "remote end closed",
+        "connection aborted",
+        "http 502",
+        "http 503",
+        "http 504",
+    ]
+    return any(marker in text for marker in transient_markers)
 
 
 # Default timeout for model invocations (seconds)
@@ -188,6 +273,36 @@ async def invoke_model_with_timeout(model, messages, timeout: int = None, label:
             f"This may indicate the model is too slow for this role. "
             f"Consider using a faster model (e.g., deepseek-chat instead of deepseek-reasoner) "
             f"or increasing MODEL_INVOKE_TIMEOUT."
+        )
+
+
+async def invoke_phase_with_fallback(
+    configurable: ComputationalConfiguration,
+    config: RunnableConfig,
+    phase: str,
+    messages: List[Any],
+    label: str,
+):
+    """Invoke a phase model and fallback to fast model if configured."""
+    primary_model = configurable_model.with_config(get_phase_model_config(configurable, config, phase))
+    try:
+        return await invoke_model_with_timeout(primary_model, messages, timeout=MODEL_INVOKE_TIMEOUT, label=label)
+    except Exception as exc:  # noqa: BLE001
+        fallback_model = configurable.fallback_fast_model
+        if not fallback_model:
+            raise
+        logger.warning("Phase '%s' model failed (%s). Falling back to %s", phase, exc, fallback_model)
+        fallback_config = get_model_runtime_config(
+            fallback_model,
+            config,
+            max_tokens=configurable.worker_model_max_tokens or configurable.research_model_max_tokens,
+            tags=["langsmith:nostream", f"phase:{phase}", "fallback"],
+        )
+        return await invoke_model_with_timeout(
+            configurable_model.with_config(fallback_config),
+            messages,
+            timeout=MODEL_INVOKE_TIMEOUT,
+            label=f"{label}_fallback",
         )
 
 
@@ -924,6 +1039,19 @@ async def discovery_supervisor(
                 "P=0.01-100 bar. Use scipy for integration, matplotlib for phase diagram.'"
             )
         )
+
+    class CheckNovelty(BaseModel):
+        """Run multi-round prior-art checks for a hypothesis before validation."""
+        hypothesis: str = Field(
+            description="Hypothesis or claim text to novelty-check against literature."
+        )
+
+    class ReflectHypothesis(BaseModel):
+        """Iteratively refine a hypothesis before execution."""
+        hypothesis: str = Field(description="The current hypothesis statement.")
+        experiment_description: str = Field(
+            description="Proposed experiment details used to improve feasibility."
+        )
     
     class SynthesizeFindings(BaseModel):
         """Signal that discovery is complete and synthesize findings."""
@@ -952,9 +1080,26 @@ async def discovery_supervisor(
     # to verify a hypothesis against existing literature mid-discovery.
     try:
         from open_deep_research.retrieval import contextual_retrieve as _cr_tool
-        supervisor_tools = [GatherKnowledge, ExploreData, RunExperiment, SynthesizeFindings, think_tool, _cr_tool]
+        supervisor_tools = [
+            GatherKnowledge,
+            ExploreData,
+            CheckNovelty,
+            ReflectHypothesis,
+            RunExperiment,
+            SynthesizeFindings,
+            think_tool,
+            _cr_tool,
+        ]
     except ImportError:
-        supervisor_tools = [GatherKnowledge, ExploreData, RunExperiment, SynthesizeFindings, think_tool]
+        supervisor_tools = [
+            GatherKnowledge,
+            ExploreData,
+            CheckNovelty,
+            ReflectHypothesis,
+            RunExperiment,
+            SynthesizeFindings,
+            think_tool,
+        ]
     
     supervisor_model = (
         configurable_model
@@ -1099,7 +1244,7 @@ async def discovery_supervisor(
 async def supervisor_tools(
     state: ComputationalDiscoveryState,
     config: RunnableConfig
-) -> Command[Literal["discovery_supervisor", "gather_knowledge", "explore_data", "run_experiment", "synthesize_findings", "__end__"]]:
+) -> Command[Literal["discovery_supervisor", "gather_knowledge", "explore_data", "check_novelty", "reflect_hypothesis", "run_experiment", "synthesize_findings", "__end__"]]:
     """Execute tools called by the discovery supervisor."""
     node_start = perf_counter()
     configurable = ComputationalConfiguration.from_runnable_config(config)
@@ -1222,6 +1367,30 @@ async def supervisor_tools(
             ))
             if primary_action is None:
                 primary_action = "run_experiment"
+                primary_update["_experiment_hypothesis"] = hypothesis
+                primary_update["_experiment_description"] = experiment_desc
+
+        elif tool_name == "CheckNovelty":
+            hypothesis = tool_args.get("hypothesis", "").strip()
+            all_tool_messages.append(ToolMessage(
+                content=f"Running novelty assessment for hypothesis: {hypothesis[:120]}",
+                name=tool_name,
+                tool_call_id=tool_id
+            ))
+            if primary_action is None:
+                primary_action = "check_novelty"
+                primary_update["_novelty_hypothesis"] = hypothesis
+
+        elif tool_name == "ReflectHypothesis":
+            hypothesis = tool_args.get("hypothesis", "").strip()
+            experiment_desc = tool_args.get("experiment_description", "").strip()
+            all_tool_messages.append(ToolMessage(
+                content=f"Refining hypothesis before execution: {hypothesis[:120]}",
+                name=tool_name,
+                tool_call_id=tool_id
+            ))
+            if primary_action is None:
+                primary_action = "reflect_hypothesis"
                 primary_update["_experiment_hypothesis"] = hypothesis
                 primary_update["_experiment_description"] = experiment_desc
         
@@ -1388,6 +1557,26 @@ async def supervisor_tools(
                 "supervisor_decision_traces": [decision_trace],
                 **primary_update
             }
+        )
+
+    elif primary_action == "check_novelty":
+        return Command(
+            goto="check_novelty",
+            update={
+                "supervisor_messages": all_tool_messages,
+                "supervisor_decision_traces": [decision_trace],
+                **primary_update,
+            },
+        )
+
+    elif primary_action == "reflect_hypothesis":
+        return Command(
+            goto="reflect_hypothesis",
+            update={
+                "supervisor_messages": all_tool_messages,
+                "supervisor_decision_traces": [decision_trace],
+                **primary_update,
+            },
         )
     
     elif primary_action == "synthesize_findings":
@@ -1656,6 +1845,209 @@ async def gather_knowledge(
             # Clear the temp field
             "_knowledge_request": "",
         }
+    )
+
+
+async def check_novelty(
+    state: ComputationalDiscoveryState,
+    config: RunnableConfig,
+) -> Command[Literal["discovery_supervisor"]]:
+    """Run multi-round novelty checks and record structured novelty evidence."""
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    trace_node_enter("check_novelty", iteration=iteration)
+    trace_phase_start("check_novelty.total", node_name="check_novelty", iteration=iteration)
+
+    hypothesis_text = (state.get("_novelty_hypothesis") or state.get("_experiment_hypothesis") or "").strip()
+    if not hypothesis_text:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end(
+            "check_novelty.total",
+            total_duration,
+            success=False,
+            node_name="check_novelty",
+            iteration=iteration,
+            data={"error": "missing_hypothesis"},
+        )
+        trace_node_exit("check_novelty", iteration=iteration, success=False, data={"duration_seconds": total_duration})
+        return Command(
+            goto="discovery_supervisor",
+            update={
+                "supervisor_messages": [HumanMessage(content="Novelty check skipped: missing hypothesis text.")],
+                "_novelty_hypothesis": "",
+            },
+        )
+
+    novelty_result = await assess_novelty(
+        hypothesis_text=hypothesis_text,
+        research_brief=state.get("research_brief", ""),
+        config=config,
+        configurable=configurable,
+    )
+
+    novelty_record = NoveltyCheckRecord(
+        hypothesis_text=hypothesis_text,
+        engine=configurable.novelty_engine,
+        rounds_used=novelty_result.rounds_used,
+        final_query=novelty_result.searched_queries[-1] if novelty_result.searched_queries else None,
+        searched_queries=novelty_result.searched_queries,
+        evidence_notes=[novelty_result.reasoning],
+        top_papers=novelty_result.papers[:10],
+        verdict=novelty_result.verdict,
+        confidence=novelty_result.confidence,
+        reasoning=novelty_result.reasoning,
+    )
+
+    msg = (
+        "=== Novelty Check ===\n"
+        f"Hypothesis: {hypothesis_text[:300]}\n"
+        f"Verdict: {novelty_record.verdict}\n"
+        f"Confidence: {novelty_record.confidence:.2f}\n"
+        f"Rounds: {novelty_record.rounds_used}\n"
+        f"Reasoning: {novelty_record.reasoning[:600]}"
+    )
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "check_novelty.total",
+        total_duration,
+        node_name="check_novelty",
+        iteration=iteration,
+        data={
+            "verdict": novelty_record.verdict,
+            "confidence": novelty_record.confidence,
+            "rounds_used": novelty_record.rounds_used,
+        },
+    )
+    trace_node_exit(
+        "check_novelty",
+        iteration=iteration,
+        success=True,
+        data={"duration_seconds": total_duration, "verdict": novelty_record.verdict},
+    )
+
+    return Command(
+        goto="discovery_supervisor",
+        update={
+            "novelty_checks": [novelty_record],
+            "supervisor_messages": [HumanMessage(content=msg)],
+            "trace_events": [{
+                "event_type": "novelty_check_completed",
+                "timestamp": datetime.now().isoformat(),
+                "title": "Novelty Check Completed",
+                "data": {
+                    "hypothesis": hypothesis_text[:500],
+                    "verdict": novelty_record.verdict,
+                    "confidence": novelty_record.confidence,
+                    "rounds_used": novelty_record.rounds_used,
+                },
+            }],
+            "_novelty_hypothesis": "",
+        },
+    )
+
+
+async def reflect_hypothesis(
+    state: ComputationalDiscoveryState,
+    config: RunnableConfig,
+) -> Command[Literal["run_experiment", "discovery_supervisor"]]:
+    """Iteratively reflect on a hypothesis before running experiments."""
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    trace_node_enter("reflect_hypothesis", iteration=iteration)
+    trace_phase_start("reflect_hypothesis.total", node_name="reflect_hypothesis", iteration=iteration)
+
+    hypothesis_text = state.get("_experiment_hypothesis", "").strip()
+    experiment_description = state.get("_experiment_description", "").strip()
+    if not hypothesis_text:
+        total_duration = _elapsed_seconds(node_start)
+        trace_phase_end("reflect_hypothesis.total", total_duration, success=False, node_name="reflect_hypothesis", iteration=iteration)
+        trace_node_exit("reflect_hypothesis", iteration=iteration, success=False, data={"duration_seconds": total_duration})
+        return Command(goto="discovery_supervisor")
+
+    if not configurable.enable_hypothesis_reflection:
+        return Command(goto="run_experiment")
+
+    current_hypothesis = hypothesis_text
+    reflections: List[str] = []
+    done_signal = False
+    feasibility_score = None
+    novelty_score = None
+
+    for round_idx in range(1, configurable.reflection_max_rounds + 1):
+        prompt = hypothesis_reflection_prompt.format(
+            research_brief=state.get("research_brief", "")[:3000],
+            hypothesis=current_hypothesis,
+            experiment_description=experiment_description[:2000],
+            round_idx=round_idx,
+            max_rounds=configurable.reflection_max_rounds,
+        )
+        response = await invoke_phase_with_fallback(
+            configurable=configurable,
+            config=config,
+            phase="reflection",
+            messages=[HumanMessage(content=prompt)],
+            label=f"hypothesis_reflection_round_{round_idx}",
+        )
+        parsed = _parse_json_from_response(str(response.content))
+        current_hypothesis = str(parsed.get("refined_hypothesis", current_hypothesis)).strip() or current_hypothesis
+        reflection_text = str(parsed.get("reflection", "")).strip()
+        reflections.append(reflection_text)
+        feasibility_score = _safe_float(parsed.get("feasibility_score"), feasibility_score)
+        novelty_score = _safe_float(parsed.get("novelty_score"), novelty_score)
+        done_signal = bool(parsed.get("done", False))
+        if done_signal:
+            break
+
+    reflection_record = HypothesisReflectionRecord(
+        original_hypothesis=hypothesis_text,
+        refined_hypothesis=current_hypothesis,
+        reflection_rounds=len(reflections),
+        reflections=reflections,
+        done_signal=done_signal,
+        feasibility_score=feasibility_score,
+        novelty_score=novelty_score,
+    )
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end(
+        "reflect_hypothesis.total",
+        total_duration,
+        node_name="reflect_hypothesis",
+        iteration=iteration,
+        data={"rounds": len(reflections), "done_signal": done_signal},
+    )
+    trace_node_exit("reflect_hypothesis", iteration=iteration, success=True, data={"duration_seconds": total_duration})
+
+    return Command(
+        goto="run_experiment",
+        update={
+            "hypothesis_reflections": [reflection_record],
+            "_experiment_hypothesis": current_hypothesis,
+            "supervisor_messages": [
+                HumanMessage(
+                    content=(
+                        "=== Hypothesis Reflection ===\n"
+                        f"Original: {hypothesis_text}\n"
+                        f"Refined: {current_hypothesis}\n"
+                        f"Rounds: {len(reflections)}"
+                    )
+                )
+            ],
+            "trace_events": [{
+                "event_type": "hypothesis_reflected",
+                "timestamp": datetime.now().isoformat(),
+                "title": "Hypothesis Reflection Completed",
+                "data": {
+                    "original": hypothesis_text[:400],
+                    "refined": current_hypothesis[:400],
+                    "rounds": len(reflections),
+                    "done_signal": done_signal,
+                },
+            }],
+        },
     )
 
 
@@ -2029,6 +2421,32 @@ async def run_experiment(
         rationale=experiment_description,
         status=HypothesisStatus.TESTING
     )
+
+    # Load experiment pack context (template-like contract)
+    experiment_pack = get_experiment_pack(configurable.experiment_pack_id)
+    pack_contract = (
+        f"Pack: {experiment_pack.display_name}\n"
+        f"Task Context: {experiment_pack.task_context}\n"
+        f"Required Outputs: {', '.join(experiment_pack.required_outputs) or 'none'}\n"
+        f"Preferred Metrics: {', '.join(experiment_pack.preferred_metrics) or 'none'}\n"
+        f"Planning Hints: {'; '.join(experiment_pack.planning_hints) or 'none'}"
+    )
+    run_plan = ExperimentRunPlan(
+        hypothesis_text=hypothesis_text,
+        objective=experiment_description[:400],
+        planned_runs=[
+            "run_1: baseline feasibility and data checks",
+            "run_2: primary statistical test",
+            "run_3: robustness/sensitivity check",
+        ][: configurable.orchestrator_max_runs],
+        max_runs=configurable.orchestrator_max_runs,
+        max_fix_attempts=configurable.orchestrator_max_fix_attempts,
+        completion_criteria=(
+            "At least one successful execution with statistical outputs and "
+            "quality score >= 0.6."
+        ),
+        status="running",
+    )
     
     # Build context for experiment design
     papers_summary = summarize_papers(state.get("papers", []))
@@ -2044,7 +2462,7 @@ async def run_experiment(
         available_data=f"Papers:\n{papers_summary}\n\nData Sources:\n{data_summary}",
         previous_experiments=prev_experiments,
         data_explorations=data_explorations_summary
-    )
+    ) + f"\n\n## EXPERIMENT PACK CONTRACT\n{pack_contract}\n"
     
     # Try structured output first, fall back to manual parsing for models that don't support it
     experiment_plan = None
@@ -2406,7 +2824,13 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
     
     # Execute with retry loop for code fixing
     current_code = experiment_plan.python_code
-    max_fix_attempts = int(os.getenv("MAX_CODE_FIX_ATTEMPTS", "3"))
+    if "/mnt/data" in current_code and "os.makedirs('/mnt/data'" not in current_code and 'os.makedirs("/mnt/data"' not in current_code:
+        current_code = (
+            "import os\n"
+            "os.makedirs('/mnt/data', exist_ok=True)\n\n"
+            f"{current_code}"
+        )
+    max_fix_attempts = configurable.orchestrator_max_fix_attempts
     computation_result = None
     code_execution_traces = []  # Track all execution attempts
     execution_attempt_timings: List[Dict[str, Any]] = []
@@ -2492,6 +2916,15 @@ pure Python with NO markdown, NO explanations, and MUST be syntactically complet
         if computation_result.success:
             logger.info(f"Code execution succeeded on attempt {attempt + 1}")
             break
+
+        # Transient external errors should be retried before code-fixing.
+        if _is_transient_external_error(computation_result.error_message) and attempt < max_fix_attempts:
+            logger.warning(
+                "Transient external error detected on attempt %d, retrying same code before fix: %s",
+                attempt + 1,
+                str(computation_result.error_message)[:300],
+            )
+            continue
         
         # If failed and we have retries left, try to fix the code
         if attempt < max_fix_attempts:
@@ -2862,6 +3295,26 @@ Description: {experiment_description}
             "_current_hypothesis": hypothesis,
             "_experiment_quality": quality,
             "_quality_message": quality_message,
+            "experiment_run_plans": [
+                run_plan.model_copy(
+                    update={
+                        "completed_runs": 1 if computation_result.success else 0,
+                        "status": "completed" if computation_result.success else "failed",
+                        "updated_at": datetime.now(),
+                    }
+                )
+            ],
+            "active_experiment_pack": experiment_pack.id,
+            "experiment_pack_context": {
+                "type": "override",
+                "value": {
+                    "pack_id": experiment_pack.id,
+                    "display_name": experiment_pack.display_name,
+                    "required_outputs": experiment_pack.required_outputs,
+                    "preferred_metrics": experiment_pack.preferred_metrics,
+                    "completion_criteria": run_plan.completion_criteria,
+                },
+            },
             # Clear consumed temp fields
             "_experiment_hypothesis": "",
             "_experiment_description": "",
@@ -3557,9 +4010,26 @@ async def validate_claims(
         )
 
     # Final claim verdict
+    latest_novelty_check = (state.get("novelty_checks") or [])[-1] if state.get("novelty_checks") else None
+    novelty_blocked = False
+    novelty_block_reason = ""
+    if configurable.enable_novelty_engine and latest_novelty_check:
+        if (
+            latest_novelty_check.verdict == "not_novel"
+            and latest_novelty_check.confidence >= configurable.novelty_min_confidence_to_block
+        ):
+            novelty_blocked = True
+            novelty_block_reason = (
+                "Novelty engine indicates substantial overlap with prior literature "
+                f"(confidence={latest_novelty_check.confidence:.2f})."
+            )
+
     if contradiction_notes:
         claim_status = ClaimStatus.REJECTED
         verdict_reason = "; ".join(contradiction_notes)
+    elif novelty_blocked:
+        claim_status = ClaimStatus.REJECTED
+        verdict_reason = novelty_block_reason
     elif requires_replication and not replication_passed:
         claim_status = ClaimStatus.INCONCLUSIVE
         verdict_reason = replication_reason
@@ -3684,7 +4154,7 @@ async def validate_claims(
 async def synthesize_findings(
     state: ComputationalDiscoveryState,
     config: RunnableConfig
-) -> Command[Literal["__end__", "discovery_supervisor"]]:
+) -> Command[Literal["__end__", "discovery_supervisor", "write_paper_draft"]]:
     """Synthesize all findings into a comprehensive research report.
     
     This is the final node that creates the complete research report,
@@ -3955,12 +4425,160 @@ An error occurred during report synthesis: {str(e)}
     )
     TraceManager.finalize(final_report)
     
+    next_node: str = END
+    if configurable.enable_paper_pipeline:
+        next_node = "write_paper_draft"
+
     return Command(
-        goto=END,
+        goto=next_node,
         update={
             "final_report": final_report,
             "messages": [AIMessage(content=final_report)],
+            "_paper_draft_requested": configurable.enable_paper_pipeline,
             # Final traceability data
             "trace_events": [final_trace_event],
         }
+    )
+
+
+async def write_paper_draft(
+    state: ComputationalDiscoveryState,
+    config: RunnableConfig,
+) -> Command[Literal["review_paper_draft", "__end__"]]:
+    """Generate a structured paper draft from synthesized findings."""
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    trace_node_enter("write_paper_draft", iteration=iteration)
+    trace_phase_start("write_paper_draft.total", node_name="write_paper_draft", iteration=iteration)
+
+    if not configurable.enable_paper_pipeline:
+        return Command(goto=END)
+
+    findings_text = summarize_findings(state.get("findings", []))
+    outputs_catalogue = create_outputs_catalogue(state)
+    raw_notes = "\n\n".join([r.to_ai_summary() for r in state.get("computation_results", [])])[:25000]
+    claim_ledger_summary = summarize_claim_ledger(state.get("claim_ledger", []))
+
+    prompt = paper_draft_prompt.format(
+        research_brief=state.get("research_brief", "")[:4000],
+        findings=findings_text[:6000],
+        claim_ledger=claim_ledger_summary[:6000],
+        outputs_catalogue=outputs_catalogue[:6000],
+        raw_notes=raw_notes,
+    )
+    response = await invoke_phase_with_fallback(
+        configurable=configurable,
+        config=config,
+        phase="writeup",
+        messages=[HumanMessage(content=prompt)],
+        label="write_paper_draft",
+    )
+    draft_text = str(response.content)
+    draft_record = PaperDraftRecord(
+        title="Computational Discovery Draft",
+        body_markdown=draft_text,
+        source_finding_ids=[
+            f.get("id") if isinstance(f, dict) else getattr(f, "id", "")
+            for f in state.get("findings", [])
+            if (f.get("id") if isinstance(f, dict) else getattr(f, "id", None))
+        ],
+    )
+
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end("write_paper_draft.total", total_duration, node_name="write_paper_draft", iteration=iteration)
+    trace_node_exit(
+        "write_paper_draft",
+        iteration=iteration,
+        success=True,
+        data={"duration_seconds": total_duration, "draft_length": len(draft_text)},
+    )
+    return Command(
+        goto="review_paper_draft",
+        update={
+            "paper_drafts": [draft_record],
+            "paper_draft_markdown": draft_text,
+            "_review_draft_requested": True,
+            "trace_events": [{
+                "event_type": "paper_draft_generated",
+                "timestamp": datetime.now().isoformat(),
+                "title": "Paper Draft Generated",
+                "data": {"draft_id": draft_record.id, "length": len(draft_text)},
+            }],
+        },
+    )
+
+
+async def review_paper_draft(
+    state: ComputationalDiscoveryState,
+    config: RunnableConfig,
+) -> Command[Literal["__end__"]]:
+    """Review the generated paper draft and attach revision guidance."""
+    node_start = perf_counter()
+    iteration = state.get("discovery_iterations", 0)
+    configurable = ComputationalConfiguration.from_runnable_config(config)
+    trace_node_enter("review_paper_draft", iteration=iteration)
+    trace_phase_start("review_paper_draft.total", node_name="review_paper_draft", iteration=iteration)
+
+    drafts = state.get("paper_drafts", [])
+    if not drafts:
+        return Command(goto=END)
+
+    latest_draft = drafts[-1]
+    draft_id = latest_draft.get("id") if isinstance(latest_draft, dict) else getattr(latest_draft, "id", "")
+    draft_body = (
+        latest_draft.get("body_markdown", "")
+        if isinstance(latest_draft, dict)
+        else getattr(latest_draft, "body_markdown", "")
+    )
+    review_prompt = paper_review_prompt.format(draft_markdown=str(draft_body)[:20000])
+    response = await invoke_phase_with_fallback(
+        configurable=configurable,
+        config=config,
+        phase="review",
+        messages=[HumanMessage(content=review_prompt)],
+        label="review_paper_draft",
+    )
+    parsed = _parse_json_from_response(str(response.content))
+    review_record = PaperReviewRecord(
+        draft_id=draft_id,
+        reviewer_model=configurable.review_model or configurable.worker_model or configurable.research_model,
+        overall_score=_safe_float(parsed.get("overall_score"), 0.0) or 0.0,
+        decision=str(parsed.get("decision", "revise")).strip().lower(),
+        strengths=[str(s) for s in parsed.get("strengths", [])][:8],
+        weaknesses=[str(s) for s in parsed.get("weaknesses", [])][:8],
+        revision_requests=[str(s) for s in parsed.get("revision_requests", [])][:10],
+    )
+
+    summary = (
+        f"Paper review decision: {review_record.decision} "
+        f"(score={review_record.overall_score:.2f}). "
+        f"Top revisions: {'; '.join(review_record.revision_requests[:3]) or 'none'}"
+    )
+    total_duration = _elapsed_seconds(node_start)
+    trace_phase_end("review_paper_draft.total", total_duration, node_name="review_paper_draft", iteration=iteration)
+    trace_node_exit(
+        "review_paper_draft",
+        iteration=iteration,
+        success=True,
+        data={"duration_seconds": total_duration, "decision": review_record.decision},
+    )
+
+    return Command(
+        goto=END,
+        update={
+            "paper_reviews": [review_record],
+            "paper_review_summary": summary,
+            "final_report": f"{state.get('final_report', '')}\n\n## Paper Review Summary\n{summary}\n",
+            "trace_events": [{
+                "event_type": "paper_review_completed",
+                "timestamp": datetime.now().isoformat(),
+                "title": "Paper Review Completed",
+                "data": {
+                    "draft_id": draft_id,
+                    "decision": review_record.decision,
+                    "score": review_record.overall_score,
+                },
+            }],
+        },
     )

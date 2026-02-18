@@ -118,6 +118,26 @@ class Configuration(BaseModel):
         }
     )
     # Model Configuration
+    enable_phase_model_routing: bool = Field(
+        default=True,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "boolean",
+                "default": True,
+                "description": "Allow specialized phases (novelty/reflection/writeup/review) to use dedicated models when configured."
+            }
+        }
+    )
+    fallback_fast_model: Optional[str] = Field(
+        default=None,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "text",
+                "default": "",
+                "description": "Optional fallback model used when a specialized phase model fails."
+            }
+        }
+    )
     summarization_model: str = Field(
         default="openai:gpt-4.1-mini",
         metadata={

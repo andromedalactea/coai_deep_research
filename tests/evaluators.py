@@ -172,3 +172,86 @@ def eval_completeness(inputs: dict, outputs: dict):
         {"role": "user", "content": user_input_content}
     ]))
     return {"key": "completeness_score", "score": eval_result.score / 5, "comment": eval_result.reasoning}
+
+
+def eval_novelty_decision_calibration(inputs: dict, outputs: dict):
+    """Heuristic metric for novelty engine consistency against claim outcomes."""
+    novelty_checks = outputs.get("novelty_checks", []) or []
+    claim_ledger = outputs.get("claim_ledger", []) or []
+    if not novelty_checks:
+        return {"key": "novelty_decision_calibration", "score": 0.0, "comment": "No novelty checks recorded."}
+
+    last_check = novelty_checks[-1]
+    verdict = (last_check.get("verdict") if isinstance(last_check, dict) else getattr(last_check, "verdict", "")) or ""
+    confidence = (last_check.get("confidence") if isinstance(last_check, dict) else getattr(last_check, "confidence", 0.0)) or 0.0
+    validated_claims = 0
+    rejected_claims = 0
+    for claim in claim_ledger:
+        status = (claim.get("status") if isinstance(claim, dict) else getattr(claim, "status", ""))
+        status_value = status.get("value") if isinstance(status, dict) else getattr(status, "value", status)
+        if str(status_value) == "validated":
+            validated_claims += 1
+        if str(status_value) == "rejected":
+            rejected_claims += 1
+
+    if verdict == "not_novel" and rejected_claims > 0:
+        score = min(1.0, 0.6 + float(confidence) * 0.4)
+    elif verdict == "novel" and validated_claims > 0:
+        score = min(1.0, 0.6 + float(confidence) * 0.4)
+    else:
+        score = 0.35
+    return {"key": "novelty_decision_calibration", "score": score, "comment": f"verdict={verdict}, confidence={confidence}"}
+
+
+def eval_hypothesis_testability(inputs: dict, outputs: dict):
+    """Heuristic metric for whether hypotheses are concretely testable."""
+    hypotheses = outputs.get("hypotheses", []) or []
+    experiments = outputs.get("experiments", []) or []
+    reflections = outputs.get("hypothesis_reflections", []) or []
+    if not hypotheses:
+        return {"key": "hypothesis_testability_quality", "score": 0.0, "comment": "No hypotheses found."}
+
+    ratio = min(1.0, len(experiments) / max(1, len(hypotheses)))
+    reflection_bonus = 0.1 if len(reflections) > 0 else 0.0
+    score = min(1.0, 0.4 + 0.5 * ratio + reflection_bonus)
+    return {"key": "hypothesis_testability_quality", "score": score, "comment": f"hypotheses={len(hypotheses)}, experiments={len(experiments)}"}
+
+
+def eval_replication_pass_rate(inputs: dict, outputs: dict):
+    """Score the pass-rate of required claim replications."""
+    claim_ledger = outputs.get("claim_ledger", []) or []
+    if not claim_ledger:
+        return {"key": "replication_pass_rate", "score": 0.0, "comment": "No claims available."}
+
+    required = 0
+    passed = 0
+    for claim in claim_ledger:
+        rep_status = claim.get("replication_status") if isinstance(claim, dict) else getattr(claim, "replication_status", "")
+        rep_value = rep_status.get("value") if isinstance(rep_status, dict) else getattr(rep_status, "value", rep_status)
+        if str(rep_value) in {"required", "passed", "failed"}:
+            required += 1
+        if str(rep_value) == "passed":
+            passed += 1
+
+    if required == 0:
+        return {"key": "replication_pass_rate", "score": 1.0, "comment": "No replication required."}
+    return {"key": "replication_pass_rate", "score": passed / required, "comment": f"passed={passed}, required={required}"}
+
+
+def eval_writeup_review_consistency(inputs: dict, outputs: dict):
+    """Check whether draft/review pipeline is coherent and present."""
+    draft = outputs.get("paper_draft_markdown", "") or ""
+    summary = outputs.get("paper_review_summary", "") or ""
+    review_records = outputs.get("paper_reviews", []) or []
+    final_report = outputs.get("final_report", "") or ""
+
+    score = 0.0
+    if draft:
+        score += 0.35
+    if summary:
+        score += 0.35
+    if review_records:
+        score += 0.2
+    if "Paper Review Summary" in final_report:
+        score += 0.1
+    return {"key": "writeup_review_consistency", "score": min(1.0, score), "comment": f"draft={bool(draft)}, review={bool(summary)}"}

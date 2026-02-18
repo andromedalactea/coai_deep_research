@@ -91,12 +91,17 @@ class TraceEventType(str, Enum):
     CLAIM_CREATED = "claim_created"
     CLAIM_VALIDATED = "claim_validated"
     CLAIM_REJECTED = "claim_rejected"
+    NOVELTY_CHECK_STARTED = "novelty_check_started"
+    NOVELTY_CHECK_COMPLETED = "novelty_check_completed"
+    HYPOTHESIS_REFLECTED = "hypothesis_reflected"
     REPLICATION_STARTED = "replication_started"
     REPLICATION_COMPLETED = "replication_completed"
     
     # Report events
     REPORT_GENERATION_START = "report_generation_start"
     REPORT_GENERATED = "report_generated"
+    PAPER_DRAFT_GENERATED = "paper_draft_generated"
+    PAPER_REVIEW_COMPLETED = "paper_review_completed"
     
     # Error events
     ERROR = "error"

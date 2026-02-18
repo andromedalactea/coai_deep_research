@@ -464,6 +464,80 @@ class ClaimValidationRecord(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.now)
 
 
+class NoveltyCheckRecord(BaseModel):
+    """Record of a multi-round novelty assessment."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    hypothesis_text: str = ""
+    engine: str = "semantic_scholar"
+    rounds_used: int = 0
+    final_query: Optional[str] = None
+    searched_queries: List[str] = Field(default_factory=list)
+    evidence_notes: List[str] = Field(default_factory=list)
+    top_papers: List[Dict[str, Any]] = Field(default_factory=list)
+    verdict: str = "unknown"  # novel | not_novel | inconclusive
+    confidence: float = 0.0
+    reasoning: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class HypothesisReflectionRecord(BaseModel):
+    """Record of iterative reflection and refinement over a hypothesis."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    original_hypothesis: str
+    refined_hypothesis: str
+    reflection_rounds: int = 1
+    reflections: List[str] = Field(default_factory=list)
+    done_signal: bool = False
+    feasibility_score: Optional[float] = None
+    novelty_score: Optional[float] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ExperimentRunPlan(BaseModel):
+    """Planned run strategy for a hypothesis/experiment cycle."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    hypothesis_text: str
+    objective: str = ""
+    planned_runs: List[str] = Field(default_factory=list)
+    max_runs: int = 3
+    max_fix_attempts: int = 2
+    completion_criteria: str = ""
+    completed_runs: int = 0
+    status: str = "planned"  # planned | running | completed | failed
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class PaperDraftRecord(BaseModel):
+    """Draft artifact generated from discovery outputs."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    title: str = "Computational Discovery Draft"
+    abstract: str = ""
+    body_markdown: str = ""
+    references: List[str] = Field(default_factory=list)
+    source_finding_ids: List[str] = Field(default_factory=list)
+    version: int = 1
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class PaperReviewRecord(BaseModel):
+    """Review artifact for a generated draft."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    draft_id: str
+    reviewer_model: str = ""
+    overall_score: float = 0.0
+    decision: str = "revise"  # accept | revise | reject
+    strengths: List[str] = Field(default_factory=list)
+    weaknesses: List[str] = Field(default_factory=list)
+    revision_requests: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 # =============================================================================
 # Reducers for State Management
 # =============================================================================
@@ -539,6 +613,11 @@ class ComputationalDiscoveryState(MessagesState):
     # Discovery tracking
     findings: Annotated[List[Finding], override_or_append_reducer] = []
     claim_ledger: Annotated[List[ClaimValidationRecord], override_or_append_reducer] = []
+    novelty_checks: Annotated[List[NoveltyCheckRecord], override_or_append_reducer] = []
+    hypothesis_reflections: Annotated[List[HypothesisReflectionRecord], override_or_append_reducer] = []
+    experiment_run_plans: Annotated[List[ExperimentRunPlan], override_or_append_reducer] = []
+    paper_drafts: Annotated[List[PaperDraftRecord], override_or_append_reducer] = []
+    paper_reviews: Annotated[List[PaperReviewRecord], override_or_append_reducer] = []
     new_questions: Annotated[List[str], override_or_append_reducer] = []
     
     # Iteration control
@@ -547,6 +626,8 @@ class ComputationalDiscoveryState(MessagesState):
     
     # Final output
     final_report: str = ""
+    paper_draft_markdown: str = ""
+    paper_review_summary: str = ""
     
     # Internal tracking
     supervisor_messages: Annotated[List[MessageLikeRepresentation], override_or_append_reducer] = []
@@ -555,9 +636,17 @@ class ComputationalDiscoveryState(MessagesState):
     # These are cleared at the start of each consuming node
     _experiment_hypothesis: str = ""
     _experiment_description: str = ""
+    _run_plan_objective: str = ""
     _knowledge_request: str = ""
+    _novelty_hypothesis: str = ""
+    _paper_draft_requested: bool = False
+    _review_draft_requested: bool = False
     _exploration_data_source: str = ""  # Data source to explore
     _exploration_goal: str = ""  # What to discover about the data source
+
+    # Experiment pack metadata
+    active_experiment_pack: str = "default"
+    experiment_pack_context: Annotated[Dict[str, Any], merge_dict_reducer] = {}
     
     # Current experiment/hypothesis being processed (passed between nodes)
     _current_experiment: Optional["ExperimentRecord"] = None

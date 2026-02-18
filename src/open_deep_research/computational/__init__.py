@@ -27,6 +27,11 @@ from open_deep_research.computational.state import (
     ClaimStatus,
     ReplicationStatus,
     ClaimValidationRecord,
+    NoveltyCheckRecord,
+    HypothesisReflectionRecord,
+    ExperimentRunPlan,
+    PaperDraftRecord,
+    PaperReviewRecord,
     ExperimentRecord,
     ExperimentStatus,
     ExperimentDesign,
@@ -82,6 +87,15 @@ from open_deep_research.computational.configuration import (
     get_domain_data_sources,
     get_domain_prompt_context,
 )
+from open_deep_research.computational.experiment_packs import (
+    ExperimentPack,
+    get_experiment_pack,
+    list_experiment_packs,
+)
+from open_deep_research.computational.novelty_engine import (
+    NoveltyAssessmentResult,
+    assess_novelty,
+)
 
 from open_deep_research.computational.traceability import (
     TraceEventType,
@@ -110,6 +124,11 @@ __all__ = [
     "ClaimStatus",
     "ReplicationStatus",
     "ClaimValidationRecord",
+    "NoveltyCheckRecord",
+    "HypothesisReflectionRecord",
+    "ExperimentRunPlan",
+    "PaperDraftRecord",
+    "PaperReviewRecord",
     "ExperimentRecord",
     "ExperimentStatus", 
     "ExperimentDesign",
@@ -154,6 +173,11 @@ __all__ = [
     "get_domain_specific_packages",
     "get_domain_data_sources",
     "get_domain_prompt_context",
+    "ExperimentPack",
+    "get_experiment_pack",
+    "list_experiment_packs",
+    "NoveltyAssessmentResult",
+    "assess_novelty",
     
     # Traceability
     "TraceEventType",

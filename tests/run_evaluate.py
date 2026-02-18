@@ -1,5 +1,16 @@
 from langsmith import Client
-from tests.evaluators import eval_overall_quality, eval_relevance, eval_structure, eval_correctness, eval_groundedness, eval_completeness
+from tests.evaluators import (
+    eval_overall_quality,
+    eval_relevance,
+    eval_structure,
+    eval_correctness,
+    eval_groundedness,
+    eval_completeness,
+    eval_novelty_decision_calibration,
+    eval_hypothesis_testability,
+    eval_replication_pass_rate,
+    eval_writeup_review_consistency,
+)
 from dotenv import load_dotenv
 import asyncio
 from open_deep_research.deep_researcher import deep_researcher_builder
@@ -12,7 +23,18 @@ client = Client()
 
 # NOTE: Configure the right dataset and evaluators
 dataset_name = "Deep Research Bench"
-evaluators = [eval_overall_quality, eval_relevance, eval_structure, eval_correctness, eval_groundedness, eval_completeness]
+evaluators = [
+    eval_overall_quality,
+    eval_relevance,
+    eval_structure,
+    eval_correctness,
+    eval_groundedness,
+    eval_completeness,
+    eval_novelty_decision_calibration,
+    eval_hypothesis_testability,
+    eval_replication_pass_rate,
+    eval_writeup_review_consistency,
+]
 # NOTE: Configure the right parameters for the experiment, these will be logged in the metadata
 max_structured_output_retries = 3
 allow_clarification = False

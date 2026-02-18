@@ -1068,13 +1068,112 @@ Task:
 4. State whether replication should be required before validation.
 
 Output format:
-{
+{{
   "status": "validated|rejected|inconclusive",
   "novelty_confidence": 0.0,
   "reason": "short evidence-based rationale",
   "requires_replication": true/false,
   "contradictions": ["optional contradiction note"]
-}
+}}
+"""
+
+# =============================================================================
+# Novelty and Reflection Prompts
+# =============================================================================
+
+novelty_assessment_prompt = """
+You are a strict novelty assessor.
+
+Research brief:
+{research_brief}
+
+Hypothesis:
+{hypothesis}
+
+Prior evidence:
+{evidence_summary}
+
+Return ONLY JSON:
+{{
+  "query": "optional targeted search query",
+  "decision": "continue|novel|not_novel",
+  "confidence": 0.0,
+  "reasoning": "short evidence-based explanation"
+}}
+"""
+
+hypothesis_reflection_prompt = """
+You are refining a scientific hypothesis before execution.
+
+Research brief:
+{research_brief}
+
+Current hypothesis:
+{hypothesis}
+
+Experiment request:
+{experiment_description}
+
+Round {round_idx}/{max_rounds}.
+
+Return ONLY JSON:
+{{
+  "refined_hypothesis": "improved falsifiable hypothesis",
+  "reflection": "what was improved",
+  "feasibility_score": 0.0,
+  "novelty_score": 0.0,
+  "done": true/false
+}}
+"""
+
+# =============================================================================
+# Paper Pipeline Prompts
+# =============================================================================
+
+paper_draft_prompt = """
+You are drafting a scientific manuscript from validated computational findings.
+
+Research brief:
+{research_brief}
+
+Findings:
+{findings}
+
+Claim ledger:
+{claim_ledger}
+
+Output catalogue:
+{outputs_catalogue}
+
+Raw notes:
+{raw_notes}
+
+Return markdown with sections:
+1. Title
+2. Abstract
+3. Introduction
+4. Methods
+5. Results
+6. Discussion
+7. Limitations
+8. Conclusion
+9. References
+"""
+
+paper_review_prompt = """
+You are reviewing a generated scientific draft.
+
+Draft markdown:
+{draft_markdown}
+
+Return ONLY JSON:
+{{
+  "overall_score": 0.0,
+  "decision": "accept|revise|reject",
+  "strengths": ["..."],
+  "weaknesses": ["..."],
+  "revision_requests": ["..."]
+}}
 """
 
 
